@@ -1,30 +1,39 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <Update.h>
-#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <AccelStepper.h>
 #include <ESPmDNS.h>
 #include <ctype.h>
 
-// const char* ssid = "IIIT-Guest";
-// const char* password = "f6s68VHJ89mC";
+#include "OtaService.h"
 
-const char* ssid = "MADHU";
-const char* password = "6303852931";
+const char* ssid = "IIIT-Guest";
+const char* password = "f6s68VHJ89mC";
 
-const int CURRENT_VERSION = 7;
+// const char* ssid = "MADHU";
+// const char* password = "6303852931";
+
+const int CURRENT_VERSION = 6;
 const char* versionUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/var.txt";
 const char* firmwareUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/firmware.bin";
-const char* deviceId = "dosamatic-esp32-02";
+const char* deviceId = "test-006";
 
 // Firebase Realtime Database endpoint (write-once at boot)
-// Example: https://<project-id>-default-rtdb.<region>.firebasedatabase.app/dosamatic/boot_ack.json
-const char* firebaseBootAckUrl = "https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/dosamatic/boot_ack.json";
+// Example: https://<project-id>-default-rtdb.<region>.firebasedatabase.app/boot_ack
+// Device data will be written to: <base>/<device_id>.json
+const char* firebaseBootAckBaseUrl = nullptr;
 // Optional database secret/token if your DB rules require auth.
 // Leave empty string if your rules allow write for this specific path.
 const char* firebaseAuthToken = "";
+
+const OtaConfig otaConfig = {
+	CURRENT_VERSION,
+	versionUrl,
+	firmwareUrl,
+	deviceId,
+	firebaseBootAckBaseUrl,
+	firebaseAuthToken,
+};
 
 #define STEP1_PIN 32
 #define DIR1_PIN  33
@@ -178,165 +187,6 @@ bool isValidFeed(long value) {
 	return value >= MIN_FEED_STEPS_PER_SEC && value <= MAX_FEED_STEPS_PER_SEC;
 }
 
-void sendBootAckToFirebaseOnce() {
-	if (WiFi.status() != WL_CONNECTED) {
-		Serial.println("BOOT_ACK: skipped, WiFi disconnected");
-		return;
-	}
-
-	String url = String(firebaseBootAckUrl);
-	if (strlen(firebaseAuthToken) > 0) {
-		url += (url.indexOf('?') >= 0) ? "&auth=" : "?auth=";
-		url += firebaseAuthToken;
-	}
-
-	WiFiClientSecure client;
-	client.setInsecure();
-
-	HTTPClient http;
-	http.setTimeout(10000);
-	http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-
-	if (!http.begin(client, url)) {
-		Serial.println("BOOT_ACK: failed to open firebase URL");
-		return;
-	}
-
-	http.addHeader("Content-Type", "application/json");
-
-	StaticJsonDocument<384> doc;
-	doc["device_id"] = deviceId;
-	doc["fw_version"] = CURRENT_VERSION;
-	doc["local_ip"] = WiFi.localIP().toString();
-	doc["ssid"] = WiFi.SSID();
-	doc["rssi"] = WiFi.RSSI();
-	doc["boot_ms"] = millis();
-	doc["state"] = stateToString(currentState);
-	doc["gcode_mode"] = gcodeAbsoluteMode ? "G90" : "G91";
-
-	String payload;
-	serializeJson(doc, payload);
-
-	int code = http.PUT(payload);
-	String responseBody = http.getString();
-	if (code > 0) {
-		Serial.printf("BOOT_ACK: sent to Firebase (HTTP %d)\n", code);
-		if (responseBody.length() > 0) {
-			Serial.printf("BOOT_ACK: response %s\n", responseBody.c_str());
-		}
-	} else {
-		Serial.printf("BOOT_ACK: send failed (%d)\n", code);
-		if (responseBody.length() > 0) {
-			Serial.printf("BOOT_ACK: response %s\n", responseBody.c_str());
-		}
-	}
-
-	http.end();
-}
-
-bool performOTAUpdate() {
-	WiFiClientSecure client;
-	client.setInsecure();
-
-	HTTPClient http;
-	http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-	http.setTimeout(20000);
-
-	if (!http.begin(client, firmwareUrl)) {
-		Serial.println("OTA: failed to open firmware URL");
-		return false;
-	}
-
-	int httpCode = http.GET();
-	if (httpCode != HTTP_CODE_OK) {
-		Serial.printf("OTA: firmware download failed (%d)\n", httpCode);
-		http.end();
-		return false;
-	}
-
-	int contentLength = http.getSize();
-	if (contentLength <= 0) {
-		Serial.println("OTA: invalid firmware size");
-		http.end();
-		return false;
-	}
-
-	if (!Update.begin(contentLength)) {
-		Serial.println("OTA: not enough space for update");
-		http.end();
-		return false;
-	}
-
-	WiFiClient* stream = http.getStreamPtr();
-	if (stream == nullptr) {
-		Serial.println("OTA: stream unavailable");
-		Update.abort();
-		http.end();
-		return false;
-	}
-
-	size_t written = Update.writeStream(*stream);
-	bool success = (written == (size_t)contentLength) && Update.end() && Update.isFinished();
-
-	if (!success) {
-		Serial.printf("OTA: update failed, err=%d, written=%u/%d\n", Update.getError(), (unsigned int)written, contentLength);
-	}
-
-	http.end();
-	return success;
-}
-
-void checkForOTAUpdateOnStartup() {
-	if (WiFi.status() != WL_CONNECTED) {
-		Serial.println("OTA: skipped (WiFi not connected)");
-		return;
-	}
-
-	Serial.println("OTA: checking for updates...");
-
-	WiFiClientSecure client;
-	client.setInsecure();
-
-	HTTPClient http;
-	http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-	http.setTimeout(15000);
-
-	if (!http.begin(client, versionUrl)) {
-		Serial.println("OTA: failed to open version URL");
-		return;
-	}
-
-	int httpCode = http.GET();
-	if (httpCode != HTTP_CODE_OK) {
-		Serial.printf("OTA: version check failed (%d)\n", httpCode);
-		http.end();
-		return;
-	}
-
-	String payload = http.getString();
-	http.end();
-
-	payload.trim();
-	payload.replace("\r", "");
-	payload.replace("\n", "");
-
-	int latestVersion = payload.toInt();
-	Serial.printf("OTA: current=%d latest=%d\n", CURRENT_VERSION, latestVersion);
-
-	if (latestVersion <= CURRENT_VERSION) {
-		Serial.println("OTA: firmware is up to date");
-		return;
-	}
-
-	Serial.println("OTA: update available, starting...");
-	if (performOTAUpdate()) {
-		Serial.println("OTA: success, rebooting...");
-		delay(1000);
-		ESP.restart();
-	} else {
-		Serial.println("OTA: update failed, continuing with current firmware");
-	}
-}
 
 String stripGcodeComments(const String& input) {
 	String line = input;
@@ -1038,8 +888,17 @@ void setup() {
 	stepper3.setAcceleration(axisAcceleration);
 
 	setupWiFi();
-	checkForOTAUpdateOnStartup();
-	sendBootAckToFirebaseOnce();
+	check_ota(otaConfig);
+	StaticJsonDocument<384> payload;
+	payload["device_id"] = deviceId;
+	payload["fw_version"] = CURRENT_VERSION;
+	payload["local_ip"] = WiFi.localIP().toString();
+	payload["ssid"] = WiFi.SSID();
+	payload["rssi"] = WiFi.RSSI();
+	payload["boot_ms"] = millis();
+	payload["state"] = stateToString(currentState);
+	payload["gcode_mode"] = gcodeAbsoluteMode ? "G90" : "G91";
+	send_ota_ack(otaConfig, payload);
 	setupWebServer();
 
 	stepper1.moveTo(HOMING_TARGET);

@@ -1,6 +1,6 @@
 # Firebase Boot Status Page
 
-This folder contains a minimal static website to show one-time ESP32 boot acknowledgement from Firebase Realtime Database.
+This folder contains a static dashboard to show per-device OTA acknowledgements from Firebase Realtime Database.
 
 ## Deploy to existing site (techlora.web.app)
 
@@ -16,19 +16,25 @@ If your Firebase project ID is not `techlora`, update `.firebaserc`.
 
 ## Realtime Database path used
 
-- `https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/dosamatic/boot_ack.json`
+- Device write (per device):
+  - `https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/boot_ack/<device_id>.json`
+- Dashboard read (all devices):
+  - `https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/boot_ack.json`
+
+Device naming convention is `project-node` (example: `spm-001`). The dashboard filters by the `project` prefix.
 
 ## Required DB rule for minimal setup
 
-For quick testing, allow read/write on this path only. Example:
+For quick testing, allow read on the collection and write on each device key. Example:
 
 ```json
 {
   "rules": {
-    "dosamatic": {
-      "boot_ack": {
-        ".read": true,
-        ".write": true
+    "boot_ack": {
+      ".read": true,
+      "$device": {
+        ".write": true,
+        ".validate": "newData.hasChildren(['device_id']) && newData.child('device_id').val() == $device"
       }
     }
   }
@@ -39,11 +45,4 @@ After validating, tighten rules.
 
 ## What gets shown
 
-- Device ID
-- Firmware version
-- Local IP
-- SSID
-- RSSI
-- Boot uptime ms
-- System state
-- G-code mode
+- All keys in each device payload are rendered dynamically.

@@ -3,145 +3,398 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dosamatic Boot Status</title>
+    <title>Universal OTA Dashboard</title>
     <style>
+      @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+      :root {
+        --bg: #0b0f18;
+        --bg-accent: #152235;
+        --surface: #111827;
+        --card: rgba(255, 255, 255, 0.06);
+        --card-border: rgba(255, 255, 255, 0.12);
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #f59e0b;
+        --accent-2: #22c55e;
+        --danger: #ef4444;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
-        font-family: Arial, sans-serif;
         margin: 0;
-        background: #f4f6f8;
-        color: #1f2937;
+        font-family: "Space Grotesk", sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top, #1f2a44, var(--bg));
+        min-height: 100vh;
       }
+
+      .grid-bg {
+        position: fixed;
+        inset: 0;
+        background-image: linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+        background-size: 40px 40px;
+        opacity: 0.35;
+        pointer-events: none;
+      }
+
       .wrap {
-        max-width: 760px;
-        margin: 40px auto;
-        padding: 0 16px;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 40px 20px 60px;
+        position: relative;
+        z-index: 1;
       }
-      .card {
-        background: #ffffff;
-        border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-        padding: 20px;
+
+      .hero {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 24px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(17, 24, 39, 0.9));
+        border: 1px solid var(--card-border);
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+        animation: fadeIn 0.6s ease-out;
       }
+
       h1 {
-        margin: 0 0 12px;
-        font-size: 24px;
+        margin: 0;
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
       }
-      .muted {
-        color: #6b7280;
+
+      .subhead {
+        color: var(--muted);
+        max-width: 720px;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      select,
+      button {
+        border: 1px solid var(--card-border);
+        border-radius: 12px;
+        padding: 10px 14px;
+        font-family: inherit;
+        color: var(--text);
+        background: rgba(17, 24, 39, 0.8);
+      }
+
+      button {
+        background: linear-gradient(120deg, #f59e0b, #f97316);
+        color: #0b0f18;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:hover {
+        filter: brightness(1.05);
+      }
+
+      .meta {
         font-size: 14px;
-        margin-bottom: 16px;
+        color: var(--muted);
       }
-      .row {
+
+      .grid {
+        margin-top: 28px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 18px;
+      }
+
+      .card {
+        padding: 18px;
+        border-radius: 16px;
+        border: 1px solid var(--card-border);
+        background: var(--card);
+        backdrop-filter: blur(8px);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        animation: riseIn 0.5s ease-out;
+      }
+
+      .card-header {
         display: flex;
         justify-content: space-between;
-        border-bottom: 1px solid #e5e7eb;
-        padding: 10px 0;
+        align-items: center;
+        margin-bottom: 12px;
       }
-      .row:last-child {
-        border-bottom: 0;
-      }
-      .key {
+
+      .device-title {
+        font-size: 18px;
         font-weight: 600;
       }
+
+      .badge {
+        font-size: 12px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.2);
+        color: var(--accent-2);
+        font-weight: 600;
+      }
+
+      .badge.warn {
+        background: rgba(239, 68, 68, 0.2);
+        color: var(--danger);
+      }
+
+      .kv {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 6px 0;
+        border-bottom: 1px dashed rgba(148, 163, 184, 0.2);
+        font-size: 14px;
+      }
+
+      .kv:last-child {
+        border-bottom: 0;
+      }
+
+      .key {
+        color: var(--muted);
+      }
+
       .value {
-        font-family: Consolas, monospace;
+        font-family: "JetBrains Mono", monospace;
         text-align: right;
         max-width: 55%;
         word-break: break-word;
       }
-      .ok {
-        color: #047857;
+
+      .footer {
+        margin-top: 28px;
+        color: var(--muted);
+        font-size: 13px;
       }
-      .bad {
-        color: #b91c1c;
+
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
-      button {
-        margin-top: 16px;
-        border: 0;
-        background: #0f766e;
-        color: #fff;
-        padding: 10px 14px;
-        border-radius: 8px;
-        cursor: pointer;
+
+      @keyframes riseIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
-      button:hover {
-        background: #115e59;
-      }
-      code {
-        background: #eef2f7;
-        padding: 2px 6px;
-        border-radius: 6px;
+
+      @media (max-width: 720px) {
+        h1 {
+          font-size: 26px;
+        }
+        .card {
+          padding: 16px;
+        }
       }
     </style>
   </head>
   <body>
+    <div class="grid-bg"></div>
     <div class="wrap">
-      <div class="card">
-        <h1>Dosamatic ESP32 Boot Acknowledge</h1>
-        <div class="muted">Reads one-time boot record from Firebase RTDB.</div>
+      <div class="hero">
+        <h1>Universal OTA Acknowledgement</h1>
+        <div class="subhead">
+          Live boot snapshots for every device. Filter by project prefix (e.g. spm-001),
+          then drill into the latest boot metadata.
+        </div>
+        <div class="controls">
+          <label class="meta">
+            Project
+            <select id="projectFilter"></select>
+          </label>
+          <button id="refreshBtn">Refresh now</button>
+          <div class="meta" id="refreshMeta">Last updated: -</div>
+          <div class="meta" id="deviceCount">Devices: 0</div>
+        </div>
+      </div>
 
-        <div class="row"><div class="key">Status</div><div id="status" class="value">Loading...</div></div>
-        <div class="row"><div class="key">Device ID</div><div id="device_id" class="value">-</div></div>
-        <div class="row"><div class="key">Firmware Version</div><div id="fw_version" class="value">-</div></div>
-        <div class="row"><div class="key">Local IP</div><div id="local_ip" class="value">-</div></div>
-        <div class="row"><div class="key">Wi-Fi SSID</div><div id="ssid" class="value">-</div></div>
-        <div class="row"><div class="key">RSSI</div><div id="rssi" class="value">-</div></div>
-        <div class="row"><div class="key">Boot ms</div><div id="boot_ms" class="value">-</div></div>
-        <div class="row"><div class="key">Machine State</div><div id="state" class="value">-</div></div>
-        <div class="row"><div class="key">G-code Mode</div><div id="gcode_mode" class="value">-</div></div>
+      <div class="grid" id="cards"></div>
 
-        <button id="refreshBtn">Refresh</button>
-
-        <p class="muted" style="margin-top:16px;">
-          Endpoint: <code id="endpointLabel"></code>
-        </p>
+      <div class="footer">
+        Endpoint: <span id="endpointLabel"></span>
       </div>
     </div>
 
     <script>
-      const firebaseUrl = "https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/dosamatic/boot_ack.json";
+      const firebaseUrl =
+        "https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/boot_ack.json";
+      const refreshIntervalMs = 10000;
+      let cachedRecords = [];
+      let currentProject = "all";
+
       document.getElementById("endpointLabel").textContent = firebaseUrl;
 
-      function setValue(id, value) {
-        const el = document.getElementById(id);
-        el.textContent = value ?? "-";
+      function safeValue(value) {
+        if (value === undefined || value === null || value === "") {
+          return "-";
+        }
+        return value;
+      }
+
+      function projectFromDeviceId(deviceId) {
+        if (!deviceId || typeof deviceId !== "string") {
+          return "unknown";
+        }
+        const parts = deviceId.split("-");
+        return parts[0] || "unknown";
+      }
+
+      function mapRecords(raw) {
+        if (!raw || typeof raw !== "object") {
+          return [];
+        }
+
+        return Object.keys(raw)
+          .map((key) => {
+            const record = raw[key] || {};
+            if (!record.device_id) {
+              record.device_id = key;
+            }
+            record.project = projectFromDeviceId(record.device_id);
+            return record;
+          })
+          .sort((a, b) => a.device_id.localeCompare(b.device_id));
+      }
+
+      function renderProjects(records) {
+        const select = document.getElementById("projectFilter");
+        const projects = Array.from(new Set(records.map((r) => r.project))).sort();
+        const options = ["all", ...projects];
+        select.innerHTML = "";
+        options.forEach((project) => {
+          const opt = document.createElement("option");
+          opt.value = project;
+          opt.textContent = project === "all" ? "All projects" : project;
+          if (project === currentProject) {
+            opt.selected = true;
+          }
+          select.appendChild(opt);
+        });
+      }
+
+      function renderCards(records) {
+        const cards = document.getElementById("cards");
+        cards.innerHTML = "";
+
+        const filtered = records.filter((record) =>
+          currentProject === "all" ? true : record.project === currentProject
+        );
+
+        document.getElementById("deviceCount").textContent = `Devices: ${filtered.length}`;
+
+        if (filtered.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "card";
+          empty.textContent = "No devices found for this project.";
+          cards.appendChild(empty);
+          return;
+        }
+
+        filtered.forEach((record) => {
+          const card = document.createElement("div");
+          card.className = "card";
+
+          const header = document.createElement("div");
+          header.className = "card-header";
+          const title = document.createElement("div");
+          title.className = "device-title";
+          title.textContent = safeValue(record.device_id);
+          const badge = document.createElement("div");
+          badge.className = "badge";
+          badge.textContent = safeValue(record.state || "READY");
+          if (!record.state) {
+            badge.classList.add("warn");
+          }
+          header.appendChild(title);
+          header.appendChild(badge);
+
+          card.appendChild(header);
+          card.appendChild(makeRow("Project", record.project));
+
+          const keys = Object.keys(record)
+            .filter((key) => !["project", "device_id"].includes(key))
+            .sort((a, b) => a.localeCompare(b));
+
+          keys.forEach((key) => {
+            card.appendChild(makeRow(key, record[key]));
+          });
+
+          cards.appendChild(card);
+        });
+      }
+
+      function makeRow(label, value) {
+        const row = document.createElement("div");
+        row.className = "kv";
+        const key = document.createElement("div");
+        key.className = "key";
+        key.textContent = label;
+        const val = document.createElement("div");
+        val.className = "value";
+        val.textContent = safeValue(value);
+        row.appendChild(key);
+        row.appendChild(val);
+        return row;
+      }
+
+      function updateRefreshMeta() {
+        const now = new Date();
+        document.getElementById("refreshMeta").textContent =
+          "Last updated: " + now.toLocaleString();
       }
 
       async function loadBootAck() {
-        const statusEl = document.getElementById("status");
-        statusEl.textContent = "Loading...";
-        statusEl.className = "value";
-
         try {
           const res = await fetch(firebaseUrl, { cache: "no-store" });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
-
-          if (!data) {
-            statusEl.textContent = "No boot record found";
-            statusEl.className = "value bad";
-            return;
-          }
-
-          statusEl.textContent = "Boot record available";
-          statusEl.className = "value ok";
-
-          setValue("device_id", data.device_id);
-          setValue("fw_version", data.fw_version);
-          setValue("local_ip", data.local_ip);
-          setValue("ssid", data.ssid);
-          setValue("rssi", data.rssi);
-          setValue("boot_ms", data.boot_ms);
-          setValue("state", data.state);
-          setValue("gcode_mode", data.gcode_mode);
+          cachedRecords = mapRecords(data);
+          renderProjects(cachedRecords);
+          renderCards(cachedRecords);
+          updateRefreshMeta();
         } catch (err) {
-          statusEl.textContent = `Failed: ${err.message}`;
-          statusEl.className = "value bad";
+          const cards = document.getElementById("cards");
+          cards.innerHTML = "";
+          const error = document.createElement("div");
+          error.className = "card";
+          error.textContent = `Failed to load data: ${err.message}`;
+          cards.appendChild(error);
         }
       }
 
+      document.getElementById("projectFilter").addEventListener("change", (event) => {
+        currentProject = event.target.value;
+        renderCards(cachedRecords);
+      });
+
       document.getElementById("refreshBtn").addEventListener("click", loadBootAck);
+
       loadBootAck();
+      setInterval(loadBootAck, refreshIntervalMs);
     </script>
   </body>
 </html>

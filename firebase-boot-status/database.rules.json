@@ -1,10 +1,10 @@
 {
   "rules": {
-    "dosamatic": {
-      "boot_ack": {
-        ".read": true,
+    "boot_ack": {
+      ".read": true,
+      "$device": {
         ".write": true,
-        ".validate": "newData.hasChildren(['device_id', 'fw_version'])"
+        ".validate": "newData.hasChildren(['device_id']) && newData.child('device_id').val() == $device"
       }
     }
   }
