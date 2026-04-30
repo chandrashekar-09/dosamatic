@@ -1,0 +1,142 @@
+openapi: 3.0.0
+info:
+  title: Dosamatic Stepper API
+  version: 1.1.0
+  description: REST API to control stepper motors and read status for the ESP32-based Dosamatic platform.
+servers:
+  - url: http://dosamatic.local
+paths:
+  /api/status:
+    get:
+      summary: Get the current status of the machine
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    type: string
+                    example: READY
+                  m1_pos:
+                    type: integer
+                  m2_pos:
+                    type: integer
+                  m3_pos:
+                    type: integer
+                  m1_limit:
+                    type: integer
+                  m2_limit:
+                    type: integer
+                  m3_limit:
+                    type: integer
+                  m1_max_speed:
+                    type: integer
+                    description: Configured max speed for axis 1 (steps/s)
+                  m2_max_speed:
+                    type: integer
+                    description: Configured max speed for axis 2 (steps/s)
+                  m3_max_speed:
+                    type: integer
+                    description: Configured max speed for axis 3 (steps/s)
+                  wifi:
+                    type: string
+                    example: CONNECTED
+                  dc_speed:
+                    type: integer
+                    description: Current DC motor speed (-255 to 255)
+  /api/path:
+    post:
+      summary: Send a sequence of waypoints for the steppers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                properties:
+                  x:
+                    type: integer
+                  y:
+                    type: integer
+                  z:
+                    type: integer
+                  speed:
+                    type: integer
+                    description: Optional speed for this waypoint in steps/s (100-10000)
+      responses:
+        '200':
+          description: Path queued successfully
+        '400':
+          description: Invalid path or max waypoints exceeded
+        '409':
+          description: Device busy (HOMING/WAITING/MOVING)
+  /api/limits:
+    post:
+      summary: Set max positive limits and max speeds for each stepper motor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max1:
+                  type: integer
+                  description: Axis 1 max travel limit (100-200000)
+                max2:
+                  type: integer
+                  description: Axis 2 max travel limit (100-200000)
+                max3:
+                  type: integer
+                  description: Axis 3 max travel limit (100-200000)
+                speed1:
+                  type: integer
+                  description: Axis 1 max speed in steps/s (100-10000)
+                speed2:
+                  type: integer
+                  description: Axis 2 max speed in steps/s (100-10000)
+                speed3:
+                  type: integer
+                  description: Axis 3 max speed in steps/s (100-10000)
+      responses:
+        '200':
+          description: Limits updated
+        '400':
+          description: Invalid limit/speed value or type
+  /api/home:
+    post:
+      summary: Trigger the homing sequence
+      responses:
+        '200':
+          description: Homing started
+  /api/dc:
+    post:
+      summary: Set DC motor direction and speed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - speed
+              properties:
+                speed:
+                  type: integer
+                  description: -255..255 (negative = backward, positive = forward, 0 = stop)
+      responses:
+        '200':
+          description: DC speed updated
+        '400':
+          description: Invalid payload
+  /api/stop:
+    post:
+      summary: Emergency stop all motors and clear the queue
+      responses:
+        '200':
+          description: Motors stopped

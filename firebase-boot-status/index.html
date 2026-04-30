@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dosamatic Boot Status</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        background: #f4f6f8;
+        color: #1f2937;
+      }
+      .wrap {
+        max-width: 760px;
+        margin: 40px auto;
+        padding: 0 16px;
+      }
+      .card {
+        background: #ffffff;
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        padding: 20px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 24px;
+      }
+      .muted {
+        color: #6b7280;
+        font-size: 14px;
+        margin-bottom: 16px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        border-bottom: 1px solid #e5e7eb;
+        padding: 10px 0;
+      }
+      .row:last-child {
+        border-bottom: 0;
+      }
+      .key {
+        font-weight: 600;
+      }
+      .value {
+        font-family: Consolas, monospace;
+        text-align: right;
+        max-width: 55%;
+        word-break: break-word;
+      }
+      .ok {
+        color: #047857;
+      }
+      .bad {
+        color: #b91c1c;
+      }
+      button {
+        margin-top: 16px;
+        border: 0;
+        background: #0f766e;
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #115e59;
+      }
+      code {
+        background: #eef2f7;
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Dosamatic ESP32 Boot Acknowledge</h1>
+        <div class="muted">Reads one-time boot record from Firebase RTDB.</div>
+
+        <div class="row"><div class="key">Status</div><div id="status" class="value">Loading...</div></div>
+        <div class="row"><div class="key">Device ID</div><div id="device_id" class="value">-</div></div>
+        <div class="row"><div class="key">Firmware Version</div><div id="fw_version" class="value">-</div></div>
+        <div class="row"><div class="key">Local IP</div><div id="local_ip" class="value">-</div></div>
+        <div class="row"><div class="key">Wi-Fi SSID</div><div id="ssid" class="value">-</div></div>
+        <div class="row"><div class="key">RSSI</div><div id="rssi" class="value">-</div></div>
+        <div class="row"><div class="key">Boot ms</div><div id="boot_ms" class="value">-</div></div>
+        <div class="row"><div class="key">Machine State</div><div id="state" class="value">-</div></div>
+        <div class="row"><div class="key">G-code Mode</div><div id="gcode_mode" class="value">-</div></div>
+
+        <button id="refreshBtn">Refresh</button>
+
+        <p class="muted" style="margin-top:16px;">
+          Endpoint: <code id="endpointLabel"></code>
+        </p>
+      </div>
+    </div>
+
+    <script>
+      const firebaseUrl = "https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/dosamatic/boot_ack.json";
+      document.getElementById("endpointLabel").textContent = firebaseUrl;
+
+      function setValue(id, value) {
+        const el = document.getElementById(id);
+        el.textContent = value ?? "-";
+      }
+
+      async function loadBootAck() {
+        const statusEl = document.getElementById("status");
+        statusEl.textContent = "Loading...";
+        statusEl.className = "value";
+
+        try {
+          const res = await fetch(firebaseUrl, { cache: "no-store" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+
+          if (!data) {
+            statusEl.textContent = "No boot record found";
+            statusEl.className = "value bad";
+            return;
+          }
+
+          statusEl.textContent = "Boot record available";
+          statusEl.className = "value ok";
+
+          setValue("device_id", data.device_id);
+          setValue("fw_version", data.fw_version);
+          setValue("local_ip", data.local_ip);
+          setValue("ssid", data.ssid);
+          setValue("rssi", data.rssi);
+          setValue("boot_ms", data.boot_ms);
+          setValue("state", data.state);
+          setValue("gcode_mode", data.gcode_mode);
+        } catch (err) {
+          statusEl.textContent = `Failed: ${err.message}`;
+          statusEl.className = "value bad";
+        }
+      }
+
+      document.getElementById("refreshBtn").addEventListener("click", loadBootAck);
+      loadBootAck();
+    </script>
+  </body>
+</html>

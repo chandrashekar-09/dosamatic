@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../../stepper-caliberation"
+		},
+		{
+			"path": "../../../.."
+		},
+		{
+			"path": "../../../../../../../../Arduino/hi-ota"
+		}
+	],
+	"settings": {}
+}

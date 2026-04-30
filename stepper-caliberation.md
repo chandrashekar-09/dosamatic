@@ -1,0 +1,592 @@
+#include <WiFi.h>
+#include <AccelStepper.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <ESPmDNS.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <HTTPClient.h>
+#include <Update.h>
+#include <WiFiClientSecure.h>
+
+// --- Wi-Fi Credentials ---
+// const char* ssid = "MADHU";
+// const char* password = "6303852931";
+
+
+const char* ssid = "IIIT-Guest";
+const char* password = "f6s68VHJ89mC";
+
+// --- Boot OTA Settings ---
+const int CURRENT_VERSION = 4;
+String versionUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/var.txt";
+String firmwareUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/firmware.bin";
+
+// --- GPIO Definitions ---
+#define STEP1_PIN 32
+#define DIR1_PIN  33
+#define LIM1_PIN  13 // change to 16 after testing
+
+#define STEP2_PIN 25
+#define DIR2_PIN  26
+#define LIM2_PIN  17
+
+#define STEP3_PIN 27
+#define DIR3_PIN  14
+#define LIM3_PIN  19
+
+#define DC_PWM_PIN 4
+#define DC_DIR_PIN 23
+
+// --- Stepper Objects ---
+AccelStepper stepper1(1, STEP1_PIN, DIR1_PIN);
+AccelStepper stepper2(1, STEP2_PIN, DIR2_PIN);
+AccelStepper stepper3(1, STEP3_PIN, DIR3_PIN);
+
+// --- State Machine ---
+enum SystemState { HOMING, WAITING, READY, MOVING };
+SystemState currentState = HOMING;
+
+unsigned long waitStartTime = 0;
+const unsigned long WAIT_DELAY = 5000;
+
+bool s1Homed = false;
+bool s2Homed = false;
+bool s3Homed = false;
+
+// --- Motion/Wi-Fi Reliability Constants ---
+const long HOMING_TARGET = -1000000;
+const long HOMING_BACKOFF_STEPS = 400;
+const long MIN_LIMIT_STEPS = 100;
+const long MAX_LIMIT_STEPS = 200000;
+const long MIN_SPEED_STEPS_PER_SEC = 100;
+const long MAX_SPEED_STEPS_PER_SEC = 10000;
+const int MIN_DC_SPEED = -255;
+const int MAX_DC_SPEED = 255;
+const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
+const unsigned long WIFI_RECONNECT_INTERVAL = 5000;
+
+// --- Configurable Limits ---
+long maxLimit1 = 14000;
+long maxLimit2 = 15000;
+long maxLimit3 = 15000;
+long maxSpeed1 = 2000;
+long maxSpeed2 = 2000;
+long maxSpeed3 = 2000;
+
+// --- Trajectory Queue ---
+#define MAX_WAYPOINTS 50
+struct Waypoint { long x; long y; long z; long speed; };
+Waypoint pathQueue[MAX_WAYPOINTS];
+int queueCount = 0;
+int queueHead = 0;
+unsigned long lastWiFiReconnectAttempt = 0;
+bool mdnsStarted = false;
+int dcMotorSpeed = 0;
+bool wasWiFiConnected = false;
+
+// PWM Properties
+const int pwmFreq = 5000;
+const int pwmResolution = 8;
+
+// --- Display Setup (SH1106 I2C) ---
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+WebServer server(80);
+
+void showIpOnDisplay();
+void checkForBootOTAUpdate();
+void performBootOTA();
+
+const char* stateToString(SystemState state) {
+  switch (state) {
+    case HOMING: return "HOMING";
+    case WAITING: return "WAITING";
+    case READY: return "READY";
+    case MOVING: return "MOVING";
+    default: return "UNKNOWN";
+  }
+}
+
+void clearPathQueue() {
+  queueCount = 0;
+  queueHead = 0;
+}
+
+bool isValidLimit(long value) {
+  return value >= MIN_LIMIT_STEPS && value <= MAX_LIMIT_STEPS;
+}
+
+bool isValidSpeed(long value) {
+  return value >= MIN_SPEED_STEPS_PER_SEC && value <= MAX_SPEED_STEPS_PER_SEC;
+}
+
+bool isValidDcSpeed(long value) {
+  return value >= MIN_DC_SPEED && value <= MAX_DC_SPEED;
+}
+
+void applyConfiguredMaxSpeeds() {
+  stepper1.setMaxSpeed(maxSpeed1);
+  stepper2.setMaxSpeed(maxSpeed2);
+  stepper3.setMaxSpeed(maxSpeed3);
+}
+
+void maintainWiFiConnection() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wasWiFiConnected) {
+      showIpOnDisplay();
+      wasWiFiConnected = true;
+    }
+    if (!mdnsStarted && MDNS.begin("dosamatic")) {
+      mdnsStarted = true;
+      Serial.println("mDNS responder started: http://dosamatic.local");
+    }
+    return;
+  }
+
+  if (millis() - lastWiFiReconnectAttempt >= WIFI_RECONNECT_INTERVAL) {
+    wasWiFiConnected = false;
+    if (mdnsStarted) {
+      MDNS.end();
+      mdnsStarted = false;
+    }
+    lastWiFiReconnectAttempt = millis();
+    Serial.println("WiFi disconnected. Reconnecting...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  u8g2.begin();
+  
+  pinMode(LIM1_PIN, INPUT_PULLUP);
+  pinMode(LIM2_PIN, INPUT_PULLUP);
+  pinMode(LIM3_PIN, INPUT_PULLUP);
+
+  pinMode(DC_DIR_PIN, OUTPUT);
+  ledcAttach(DC_PWM_PIN, pwmFreq, pwmResolution);
+
+  stepper1.setMaxSpeed(maxSpeed1);
+  stepper1.setAcceleration(1000);
+  stepper2.setMaxSpeed(maxSpeed2);
+  stepper2.setAcceleration(1000);
+  stepper3.setMaxSpeed(maxSpeed3);
+  stepper3.setAcceleration(1000);
+
+  setupWiFiAndOTA();
+  showIpOnDisplay();
+  checkForBootOTAUpdate();
+  setupWebServer();
+
+  Serial.println("System Booted. Starting Homing Sequence...");
+  stepper1.moveTo(HOMING_TARGET);
+  stepper2.moveTo(HOMING_TARGET);
+  stepper3.moveTo(HOMING_TARGET);
+}
+
+void loop() {
+  maintainWiFiConnection();
+  server.handleClient();
+
+  switch (currentState) {
+    case HOMING:
+      performHoming();
+      break;
+
+    case WAITING:
+      if (millis() - waitStartTime >= WAIT_DELAY) {
+        Serial.println("Wait complete. Ready for APIs.");
+        currentState = READY;
+      }
+      break;
+
+    case READY:
+      if (queueHead < queueCount) {
+        // Start next waypoint
+        executeNextWaypoint();
+        currentState = MOVING;
+      }
+      break;
+
+    case MOVING:
+      stepper1.run();
+      stepper2.run();
+      stepper3.run();
+
+      if (stepper1.distanceToGo() == 0 && 
+          stepper2.distanceToGo() == 0 && 
+          stepper3.distanceToGo() == 0) {
+        
+        queueHead++; // Advance to next point
+        currentState = READY;
+      }
+      break;
+  }
+}
+
+void executeNextWaypoint() {
+  if (queueHead >= queueCount) {
+    return;
+  }
+
+  long tx = pathQueue[queueHead].x;
+  long ty = pathQueue[queueHead].y;
+  long tz = pathQueue[queueHead].z;
+  long requestedSpeed = pathQueue[queueHead].speed;
+
+  // Constrain to positive limits
+  tx = constrain(tx, 0, maxLimit1);
+  ty = constrain(ty, 0, maxLimit2);
+  tz = constrain(tz, 0, maxLimit3);
+
+  long defaultSpeed = min(maxSpeed1, min(maxSpeed2, maxSpeed3));
+  long waypointSpeed = requestedSpeed > 0 ? requestedSpeed : defaultSpeed;
+  waypointSpeed = constrain(waypointSpeed, MIN_SPEED_STEPS_PER_SEC, MAX_SPEED_STEPS_PER_SEC);
+
+  stepper1.setMaxSpeed(min(maxSpeed1, waypointSpeed));
+  stepper2.setMaxSpeed(min(maxSpeed2, waypointSpeed));
+  stepper3.setMaxSpeed(min(maxSpeed3, waypointSpeed));
+
+  Serial.printf("Executing Waypoint [%d/%d]: X:%ld, Y:%ld, Z:%ld, Speed:%ld\n", queueHead+1, queueCount, tx, ty, tz, waypointSpeed);
+  stepper1.moveTo(tx);
+  stepper2.moveTo(ty);
+  stepper3.moveTo(tz);
+}
+
+// --- Web Endpoints ---
+void handleCors() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.send(204);
+}
+
+void setupWebServer() {
+  server.on("/api/status", HTTP_GET, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    StaticJsonDocument<448> doc;
+    doc["state"] = stateToString(currentState);
+    doc["wifi"] = (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED";
+    doc["m1_pos"] = stepper1.currentPosition();
+    doc["m2_pos"] = stepper2.currentPosition();
+    doc["m3_pos"] = stepper3.currentPosition();
+    doc["m1_limit"] = maxLimit1;
+    doc["m2_limit"] = maxLimit2;
+    doc["m3_limit"] = maxLimit3;
+    doc["m1_max_speed"] = maxSpeed1;
+    doc["m2_max_speed"] = maxSpeed2;
+    doc["m3_max_speed"] = maxSpeed3;
+    doc["dc_speed"] = dcMotorSpeed;
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+  });
+
+  server.on("/api/path", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    if (!server.hasArg("plain")) return server.send(400, "application/json", "{\"error\":\"body_missing\"}");
+    if (currentState == HOMING || currentState == WAITING || currentState == MOVING) {
+      return server.send(409, "application/json", "{\"error\":\"busy\"}");
+    }
+    
+    DynamicJsonDocument doc(4096);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    if (error || !doc.is<JsonArray>()) return server.send(400, "application/json", "{\"error\":\"invalid_json_array\"}");
+
+    JsonArray array = doc.as<JsonArray>();
+    if (array.size() == 0 || array.size() > MAX_WAYPOINTS) {
+      return server.send(400, "application/json", "{\"error\":\"invalid_path_size\"}");
+    }
+
+    clearPathQueue();
+    for (JsonObjectConst v : array) {
+      if (!v["x"].is<long>() || !v["y"].is<long>() || !v["z"].is<long>()) {
+        clearPathQueue();
+        return server.send(400, "application/json", "{\"error\":\"waypoint_type_invalid\"}");
+      }
+
+      long speed = min(maxSpeed1, min(maxSpeed2, maxSpeed3));
+      if (v.containsKey("speed")) {
+        if (!v["speed"].is<long>()) {
+          clearPathQueue();
+          return server.send(400, "application/json", "{\"error\":\"waypoint_speed_type_invalid\"}");
+        }
+        speed = v["speed"].as<long>();
+        if (!isValidSpeed(speed)) {
+          clearPathQueue();
+          return server.send(400, "application/json", "{\"error\":\"waypoint_speed_out_of_range\"}");
+        }
+      }
+
+      pathQueue[queueCount].x = constrain(v["x"].as<long>(), 0, maxLimit1);
+      pathQueue[queueCount].y = constrain(v["y"].as<long>(), 0, maxLimit2);
+      pathQueue[queueCount].z = constrain(v["z"].as<long>(), 0, maxLimit3);
+      pathQueue[queueCount].speed = speed;
+      ++queueCount;
+    }
+
+    server.send(200, "application/json", "{\"status\":\"queued\"}");
+  });
+
+  server.on("/api/limits", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    if (!server.hasArg("plain")) return server.send(400, "application/json", "{\"error\":\"body_missing\"}");
+    
+    StaticJsonDocument<256> doc;
+    if (deserializeJson(doc, server.arg("plain")) || !doc.is<JsonObject>()) {
+      return server.send(400, "application/json", "{\"error\":\"invalid_json_object\"}");
+    }
+
+    long newMax1 = maxLimit1;
+    long newMax2 = maxLimit2;
+    long newMax3 = maxLimit3;
+    long newSpeed1 = maxSpeed1;
+    long newSpeed2 = maxSpeed2;
+    long newSpeed3 = maxSpeed3;
+
+    if (doc.containsKey("max1")) {
+      if (!doc["max1"].is<long>()) return server.send(400, "application/json", "{\"error\":\"max1_type_invalid\"}");
+      newMax1 = doc["max1"].as<long>();
+      if (!isValidLimit(newMax1)) return server.send(400, "application/json", "{\"error\":\"max1_out_of_range\"}");
+    }
+
+    if (doc.containsKey("max2")) {
+      if (!doc["max2"].is<long>()) return server.send(400, "application/json", "{\"error\":\"max2_type_invalid\"}");
+      newMax2 = doc["max2"].as<long>();
+      if (!isValidLimit(newMax2)) return server.send(400, "application/json", "{\"error\":\"max2_out_of_range\"}");
+    }
+
+    if (doc.containsKey("max3")) {
+      if (!doc["max3"].is<long>()) return server.send(400, "application/json", "{\"error\":\"max3_type_invalid\"}");
+      newMax3 = doc["max3"].as<long>();
+      if (!isValidLimit(newMax3)) return server.send(400, "application/json", "{\"error\":\"max3_out_of_range\"}");
+    }
+
+    if (doc.containsKey("speed1")) {
+      if (!doc["speed1"].is<long>()) return server.send(400, "application/json", "{\"error\":\"speed1_type_invalid\"}");
+      newSpeed1 = doc["speed1"].as<long>();
+      if (!isValidSpeed(newSpeed1)) return server.send(400, "application/json", "{\"error\":\"speed1_out_of_range\"}");
+    }
+
+    if (doc.containsKey("speed2")) {
+      if (!doc["speed2"].is<long>()) return server.send(400, "application/json", "{\"error\":\"speed2_type_invalid\"}");
+      newSpeed2 = doc["speed2"].as<long>();
+      if (!isValidSpeed(newSpeed2)) return server.send(400, "application/json", "{\"error\":\"speed2_out_of_range\"}");
+    }
+
+    if (doc.containsKey("speed3")) {
+      if (!doc["speed3"].is<long>()) return server.send(400, "application/json", "{\"error\":\"speed3_type_invalid\"}");
+      newSpeed3 = doc["speed3"].as<long>();
+      if (!isValidSpeed(newSpeed3)) return server.send(400, "application/json", "{\"error\":\"speed3_out_of_range\"}");
+    }
+
+    maxLimit1 = newMax1;
+    maxLimit2 = newMax2;
+    maxLimit3 = newMax3;
+    maxSpeed1 = newSpeed1;
+    maxSpeed2 = newSpeed2;
+    maxSpeed3 = newSpeed3;
+    applyConfiguredMaxSpeeds();
+
+    server.send(200, "application/json", "{\"status\":\"limits updated\"}");
+  });
+
+  server.on("/api/home", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    clearPathQueue();
+    s1Homed = false; s2Homed = false; s3Homed = false;
+    stepper1.moveTo(HOMING_TARGET);
+    stepper2.moveTo(HOMING_TARGET);
+    stepper3.moveTo(HOMING_TARGET);
+    currentState = HOMING;
+    server.send(200, "application/json", "{\"status\":\"homing\"}");
+  });
+
+  server.on("/api/dc", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    if (!server.hasArg("plain")) return server.send(400, "application/json", "{\"error\":\"body_missing\"}");
+
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, server.arg("plain")) || !doc.is<JsonObject>()) {
+      return server.send(400, "application/json", "{\"error\":\"invalid_json_object\"}");
+    }
+
+    if (!doc.containsKey("speed") || !doc["speed"].is<long>()) {
+      return server.send(400, "application/json", "{\"error\":\"speed_type_invalid\"}");
+    }
+
+    long requestedSpeed = doc["speed"].as<long>();
+    if (!isValidDcSpeed(requestedSpeed)) {
+      return server.send(400, "application/json", "{\"error\":\"speed_out_of_range\"}");
+    }
+
+    setDCMotorSpeed((int)requestedSpeed);
+    server.send(200, "application/json", "{\"status\":\"dc_updated\"}");
+  });
+
+  server.on("/api/stop", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    stepper1.setSpeed(0); stepper1.moveTo(stepper1.currentPosition());
+    stepper2.setSpeed(0); stepper2.moveTo(stepper2.currentPosition());
+    stepper3.setSpeed(0); stepper3.moveTo(stepper3.currentPosition());
+    setDCMotorSpeed(0);
+    applyConfiguredMaxSpeeds();
+    clearPathQueue();
+    currentState = READY;
+    server.send(200, "application/json", "{\"status\":\"stopped\"}");
+  });
+
+  server.on("/api/status", HTTP_OPTIONS, handleCors);
+  server.on("/api/path", HTTP_OPTIONS, handleCors);
+  server.on("/api/limits", HTTP_OPTIONS, handleCors);
+  server.on("/api/home", HTTP_OPTIONS, handleCors);
+  server.on("/api/stop", HTTP_OPTIONS, handleCors);
+  server.on("/api/dc", HTTP_OPTIONS, handleCors);
+
+  server.onNotFound([]() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(404, "application/json", "{\"error\":\"not_found\"}");
+  });
+
+  server.begin();
+  Serial.println("Web Server started on Port 80");
+}
+
+void performHoming() {
+  if (!s1Homed) {
+    if (digitalRead(LIM1_PIN) == LOW) {
+      stepper1.setSpeed(0); stepper1.setCurrentPosition(0);
+      stepper1.move(HOMING_BACKOFF_STEPS); s1Homed = true;
+    } else {
+      stepper1.setSpeed(-800); stepper1.runSpeed();
+    }
+  }
+  if (!s2Homed) {
+    if (digitalRead(LIM2_PIN) == LOW) {
+      stepper2.setSpeed(0); stepper2.setCurrentPosition(0);
+      stepper2.move(HOMING_BACKOFF_STEPS); s2Homed = true;
+    } else {
+      stepper2.setSpeed(-800); stepper2.runSpeed();
+    }
+  }
+  if (!s3Homed) {
+    if (digitalRead(LIM3_PIN) == LOW) {
+      stepper3.setSpeed(0); stepper3.setCurrentPosition(0);
+      stepper3.move(HOMING_BACKOFF_STEPS); s3Homed = true;
+    } else {
+      stepper3.setSpeed(-800); stepper3.runSpeed();
+    }
+  }
+
+  if (s1Homed && s2Homed && s3Homed) {
+    if (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0 && stepper3.distanceToGo() == 0) {
+      Serial.println("Homing Sequence Fully Complete.");
+      waitStartTime = millis();
+      currentState = WAITING;
+    } else {
+      stepper1.run(); stepper2.run(); stepper3.run();
+    }
+  }
+}
+
+void setDCMotorSpeed(int speed) {
+  speed = constrain(speed, MIN_DC_SPEED, MAX_DC_SPEED);
+  dcMotorSpeed = speed;
+  if (speed >= 0) {
+    digitalWrite(DC_DIR_PIN, HIGH);
+    ledcWrite(DC_PWM_PIN, speed);
+  } else {
+    digitalWrite(DC_DIR_PIN, LOW);
+    ledcWrite(DC_PWM_PIN, abs(speed)); 
+  }
+}
+
+void setupWiFiAndOTA() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected! IP: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\nWiFi connect timeout. Continuing in offline mode.");
+  }
+}
+
+void showIpOnDisplay() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  String ipText = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("NO WIFI");
+  u8g2.drawStr(0, 36, ipText.c_str());
+  u8g2.sendBuffer();
+}
+
+void checkForBootOTAUpdate() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin(client, versionUrl);
+  int statusCode = http.GET();
+
+  if (statusCode == HTTP_CODE_OK) {
+    int latestVersion = http.getString().toInt();
+    if (latestVersion > CURRENT_VERSION) {
+      Serial.println("OTA update found. Starting boot update...");
+      http.end();
+      performBootOTA();
+      return;
+    }
+  }
+
+  http.end();
+}
+
+void performBootOTA() {
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.begin(client, firmwareUrl);
+
+  int statusCode = http.GET();
+  if (statusCode != HTTP_CODE_OK) {
+    http.end();
+    return;
+  }
+
+  int contentLength = http.getSize();
+  if (contentLength <= 0) {
+    http.end();
+    return;
+  }
+
+  if (!Update.begin(contentLength)) {
+    http.end();
+    return;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = Update.writeStream(*stream);
+
+  bool success = (written == (size_t)contentLength) && Update.end() && Update.isFinished();
+  http.end();
+
+  if (success) {
+    ESP.restart();
+  }
+}

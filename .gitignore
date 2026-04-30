@@ -1,0 +1,9 @@
+/build/
+/dosamatic_app/build/
+/dosamatic_app/.dart_tool/
+/dosamatic_app/.flutter-plugins
+/dosamatic_app/.flutter-plugins-dependencies
+/dosamatic_app/.idea/
+/dosamatic_app/.metadata
+/dosamatic_app/*.iml
+/firebase-boot-status/.firebase/
