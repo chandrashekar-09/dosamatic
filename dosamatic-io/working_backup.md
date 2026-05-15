@@ -20,7 +20,7 @@ const char* password = "f6s68VHJ89mC";
 // const char* ssid = "MADHU";
 // const char* password = "6303852931";
 
-const int CURRENT_VERSION = 7;
+const int CURRENT_VERSION = 8;
 const char* versionUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/var.txt";
 const char* firmwareUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/firmware.bin";
 const char* deviceId = "test-006";
@@ -71,26 +71,26 @@ enum HomingPhase { HOMING_SEEK_FAST, HOMING_BACKOFF_FAST, HOMING_SEEK_SLOW, HOMI
 
 const long HOMING_TARGET = -1000000;
 const long HOMING_BACKOFF_STEPS = 400;
-const long HOMING_FAST_SPEED = 6000;
+const long HOMING_FAST_SPEED = 800;
 const long HOMING_SLOW_SPEED = 800;
 const unsigned long HOMING_SWITCH_DEBOUNCE_MS = 20;
 const unsigned long WAIT_DELAY_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
-const unsigned long PLANNER_INTERVAL_US = 3000;
+const unsigned long PLANNER_INTERVAL_US = 1000;
 
 const long MIN_LIMIT_STEPS = 100;
 const long MAX_LIMIT_STEPS = 250000;
 const long MIN_FEED_STEPS_PER_SEC = 100;
 const long MAX_FEED_STEPS_PER_SEC = 12000;
 const float MIN_SEGMENT_EXEC_STEPS = 0.25f;
-const float MIN_LOOKAHEAD_SEGMENT_STEPS = 0.2f;
-const float MIN_CORNER_SPEED = 80.0f;
+const float MIN_LOOKAHEAD_SEGMENT_STEPS = 2.0f;
+const float MIN_CORNER_SPEED = 250.0f;
 const float MIN_JUNCTION_DEV = 0.001f;
 const float MAX_JUNCTION_DEV = 20.0f;
-const float ARC_CHORD_ERROR_STEPS = 1.0f;
-const float ARC_MAX_SEG_LEN = 400.0f;
-const int ARC_MAX_SEGMENTS = 180;
+const float ARC_CHORD_ERROR_STEPS = 0.25f;
+const float ARC_MAX_SEG_LEN = 120.0f;
+const int ARC_MAX_SEGMENTS = 720;
 const int MAX_GCODE_LINE = 240;
 const size_t MAX_UPLOAD_BYTES = 300000;
 const float INCH_TO_MM = 25.4f;
@@ -99,12 +99,12 @@ long maxLimit1 = 14000;
 long maxLimit2 = 15000;
 long maxLimit3 = 15000;
 
-long maxSpeed1 = 7000;
-long maxSpeed2 = 7000;
-long maxSpeed3 = 7000;
-long axisAcceleration = 22000;
-float pathAcceleration = 5000.0f;
-float junctionDeviation = 0.05f;
+long maxSpeed1 = 12000;
+long maxSpeed2 = 12000;
+long maxSpeed3 = 12000;
+long axisAcceleration = 45000;
+float pathAcceleration = 18000.0f;
+float junctionDeviation = 1.20f;
 
 const int DC_PWM_FREQ = 20000;
 const int DC_PWM_RES = 8;
@@ -763,11 +763,13 @@ float computeJunctionSpeed(const ActiveSegment& current, const Waypoint& nextPoi
 	dot = clampf(dot, -1.0f, 1.0f);
 
 	float maxJunction = min((float)current.feed, (float)nextPoint.feed);
-	float sinHalf = sqrtf(0.5f * (1.0f - dot));
-	if (sinHalf < 0.0001f) {
+	float sinHalf = sqrtf(0.5f * (1.0f + dot));
+	if (sinHalf > 0.999f) {
 		return maxJunction;
 	}
-	if (sinHalf > 0.999f) sinHalf = 0.999f;
+	if (sinHalf < 0.0001f) {
+		return MIN_CORNER_SPEED;
+	}
 
 	float v = sqrtf((pathAcceleration * junctionDeviation * sinHalf) / (1.0f - sinHalf));
 	return clampf(v, MIN_CORNER_SPEED, maxJunction);

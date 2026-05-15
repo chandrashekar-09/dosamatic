@@ -20,7 +20,7 @@ const char* password = "f6s68VHJ89mC";
 // const char* ssid = "MADHU";
 // const char* password = "6303852931";
 
-const int CURRENT_VERSION = 7;
+const int CURRENT_VERSION = 9;
 const char* versionUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/var.txt";
 const char* firmwareUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/firmware.bin";
 const char* deviceId = "test-006";
@@ -71,26 +71,26 @@ enum HomingPhase { HOMING_SEEK_FAST, HOMING_BACKOFF_FAST, HOMING_SEEK_SLOW, HOMI
 
 const long HOMING_TARGET = -1000000;
 const long HOMING_BACKOFF_STEPS = 400;
-const long HOMING_FAST_SPEED = 6000;
+const long HOMING_FAST_SPEED = 800;
 const long HOMING_SLOW_SPEED = 800;
 const unsigned long HOMING_SWITCH_DEBOUNCE_MS = 20;
 const unsigned long WAIT_DELAY_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
-const unsigned long PLANNER_INTERVAL_US = 3000;
+const unsigned long PLANNER_INTERVAL_US = 1000;
 
 const long MIN_LIMIT_STEPS = 100;
 const long MAX_LIMIT_STEPS = 250000;
 const long MIN_FEED_STEPS_PER_SEC = 100;
 const long MAX_FEED_STEPS_PER_SEC = 12000;
 const float MIN_SEGMENT_EXEC_STEPS = 0.25f;
-const float MIN_LOOKAHEAD_SEGMENT_STEPS = 0.2f;
-const float MIN_CORNER_SPEED = 80.0f;
+const float MIN_LOOKAHEAD_SEGMENT_STEPS = 2.0f;
+const float MIN_CORNER_SPEED = 250.0f;
 const float MIN_JUNCTION_DEV = 0.001f;
 const float MAX_JUNCTION_DEV = 20.0f;
-const float ARC_CHORD_ERROR_STEPS = 1.0f;
-const float ARC_MAX_SEG_LEN = 400.0f;
-const int ARC_MAX_SEGMENTS = 180;
+const float ARC_CHORD_ERROR_STEPS = 0.25f;
+const float ARC_MAX_SEG_LEN = 120.0f;
+const int ARC_MAX_SEGMENTS = 720;
 const int MAX_GCODE_LINE = 240;
 const size_t MAX_UPLOAD_BYTES = 300000;
 const float INCH_TO_MM = 25.4f;
@@ -99,12 +99,12 @@ long maxLimit1 = 14000;
 long maxLimit2 = 15000;
 long maxLimit3 = 15000;
 
-long maxSpeed1 = 7000;
-long maxSpeed2 = 7000;
-long maxSpeed3 = 7000;
-long axisAcceleration = 22000;
-float pathAcceleration = 5000.0f;
-float junctionDeviation = 0.05f;
+long maxSpeed1 = 12000;
+long maxSpeed2 = 12000;
+long maxSpeed3 = 12000;
+long axisAcceleration = 45000;
+float pathAcceleration = 18000.0f;
+float junctionDeviation = 1.20f;
 
 const int DC_PWM_FREQ = 20000;
 const int DC_PWM_RES = 8;
@@ -148,6 +148,9 @@ String lastUploadError;
 File uploadFile;
 size_t uploadBytes = 0;
 String uploadName;
+bool storageMounted = false;
+
+void stopFileRunner(bool clearError);
 
 struct Waypoint {
 	long x;
@@ -217,13 +220,78 @@ void initDcPwm() {
 }
 
 String sanitizeFilename(const String& name) {
-	String out = name;
-	int slash = out.lastIndexOf('/');
-	if (slash >= 0) out = out.substring(slash + 1);
-	out.replace("..", "");
-	out.replace("\\", "");
-	if (!out.startsWith("/")) out = "/" + out;
-	return out;
+	String base = name;
+	int slash = base.lastIndexOf('/');
+	if (slash >= 0) base = base.substring(slash + 1);
+	slash = base.lastIndexOf('\\');
+	if (slash >= 0) base = base.substring(slash + 1);
+	base.trim();
+
+	String clean = "";
+	for (int i = 0; i < base.length() && clean.length() < 48; i++) {
+		char c = base[i];
+		bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+				  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+		if (ok) {
+			clean += c;
+		} else if (c == ' ') {
+			clean += '_';
+		}
+	}
+
+	clean.replace("..", ".");
+	if (clean.length() == 0 || clean == "." || clean == "..") {
+		clean = "job.gco";
+	}
+	if (clean.indexOf('.') < 0) {
+		clean += ".gco";
+	}
+	if (!clean.startsWith("/")) clean = "/" + clean;
+	return clean;
+}
+
+bool mountStorage(bool formatOnFail) {
+	if (storageMounted) return true;
+	if (LittleFS.begin(false)) {
+		storageMounted = true;
+		return true;
+	}
+
+	Serial.println("LittleFS mount failed");
+	if (!formatOnFail) {
+		return false;
+	}
+
+	Serial.println("Formatting LittleFS...");
+	LittleFS.end();
+	if (!LittleFS.format()) {
+		Serial.println("LittleFS format failed");
+		storageMounted = false;
+		return false;
+	}
+	if (!LittleFS.begin(false)) {
+		Serial.println("LittleFS remount failed after format");
+		storageMounted = false;
+		return false;
+	}
+	storageMounted = true;
+	Serial.println("LittleFS ready after format");
+	return true;
+}
+
+bool ensureStorageReady() {
+	return storageMounted || mountStorage(false);
+}
+
+bool formatStorage() {
+	stopFileRunner(true);
+	if (uploadFile) uploadFile.close();
+	storageMounted = false;
+	LittleFS.end();
+	if (!LittleFS.format()) {
+		return false;
+	}
+	return mountStorage(false);
 }
 
 
@@ -641,6 +709,11 @@ void stopFileRunner(bool clearError = false) {
 }
 
 void startFileRunner(const String& filename) {
+	if (!ensureStorageReady()) {
+		fileError = "storage_unavailable";
+		fileRunning = false;
+		return;
+	}
 	String clean = sanitizeFilename(filename);
 	if (gcodeFile) gcodeFile.close();
 	gcodeFile = LittleFS.open(clean, "r");
@@ -763,11 +836,13 @@ float computeJunctionSpeed(const ActiveSegment& current, const Waypoint& nextPoi
 	dot = clampf(dot, -1.0f, 1.0f);
 
 	float maxJunction = min((float)current.feed, (float)nextPoint.feed);
-	float sinHalf = sqrtf(0.5f * (1.0f - dot));
-	if (sinHalf < 0.0001f) {
+	float sinHalf = sqrtf(0.5f * (1.0f + dot));
+	if (sinHalf > 0.999f) {
 		return maxJunction;
 	}
-	if (sinHalf > 0.999f) sinHalf = 0.999f;
+	if (sinHalf < 0.0001f) {
+		return MIN_CORNER_SPEED;
+	}
 
 	float v = sqrtf((pathAcceleration * junctionDeviation * sinHalf) / (1.0f - sinHalf));
 	return clampf(v, MIN_CORNER_SPEED, maxJunction);
@@ -1015,11 +1090,20 @@ void handleFileUpload() {
 		lastUploadError = "";
 		uploadBytes = 0;
 		uploadName = sanitizeFilename(upload.filename);
+		if (!ensureStorageReady()) {
+			lastUploadOk = false;
+			lastUploadError = "storage_unavailable";
+			Serial.println("UPLOAD: storage unavailable");
+			return;
+		}
 		if (upload.totalSize > MAX_UPLOAD_BYTES) {
 			lastUploadOk = false;
 			lastUploadError = "file_too_large";
 			Serial.println("UPLOAD: file too large");
 			return;
+		}
+		if (LittleFS.exists(uploadName)) {
+			LittleFS.remove(uploadName);
 		}
 		uploadFile = LittleFS.open(uploadName, "w");
 		if (!uploadFile) {
@@ -1041,7 +1125,17 @@ void handleFileUpload() {
 			if (uploadName.length() > 0) LittleFS.remove(uploadName);
 			return;
 		}
-		if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
+		if (uploadFile) {
+			size_t written = uploadFile.write(upload.buf, upload.currentSize);
+			if (written != upload.currentSize) {
+				lastUploadOk = false;
+				lastUploadError = "write_failed";
+				Serial.println("UPLOAD: write failed");
+				uploadFile.close();
+				if (uploadName.length() > 0) LittleFS.remove(uploadName);
+				return;
+			}
+		}
 	}
 
 	if (upload.status == UPLOAD_FILE_END) {
@@ -1049,10 +1143,126 @@ void handleFileUpload() {
 	}
 }
 
+void handleListFiles() {
+	if (!ensureStorageReady()) {
+		sendJsonResponse(503, "{\"mounted\":false,\"error\":\"storage_unavailable\",\"files\":[]}");
+		return;
+	}
+
+	DynamicJsonDocument doc(4096);
+	doc["mounted"] = true;
+	doc["total"] = LittleFS.totalBytes();
+	doc["used"] = LittleFS.usedBytes();
+	JsonArray files = doc["files"].to<JsonArray>();
+
+	File root = LittleFS.open("/");
+	if (!root) {
+		sendJsonResponse(500, "{\"mounted\":true,\"error\":\"root_open_failed\",\"files\":[]}");
+		return;
+	}
+
+	File file = root.openNextFile();
+	int count = 0;
+	while (file && count < 64) {
+		if (!file.isDirectory()) {
+			JsonObject item = files.add<JsonObject>();
+			String n = file.name();
+			if (!n.startsWith("/")) n = "/" + n;
+			item["name"] = n;
+			item["size"] = file.size();
+			count++;
+		}
+		file = root.openNextFile();
+	}
+
+	String out;
+	serializeJson(doc, out);
+	sendJsonResponse(200, out);
+}
+
+bool readNameJson(String& outName, const char* key = "name") {
+	String body = server.arg("plain");
+	StaticJsonDocument<192> doc;
+	if (deserializeJson(doc, body) || !doc.is<JsonObject>() || !doc[key].is<const char*>()) {
+		return false;
+	}
+	outName = sanitizeFilename(String(doc[key].as<const char*>()));
+	return true;
+}
+
+void handleDeleteFile() {
+	if (!ensureStorageReady()) {
+		sendJsonResponse(503, "{\"error\":\"storage_unavailable\"}");
+		return;
+	}
+	String name;
+	if (!readNameJson(name)) {
+		sendJsonResponse(400, "{\"error\":\"name_missing\"}");
+		return;
+	}
+	if (runningFile == name) {
+		stopFileRunner(true);
+	}
+	if (!LittleFS.exists(name)) {
+		sendJsonResponse(404, "{\"error\":\"file_not_found\"}");
+		return;
+	}
+	if (!LittleFS.remove(name)) {
+		sendJsonResponse(500, "{\"error\":\"delete_failed\"}");
+		return;
+	}
+	sendJsonResponse(200, "{\"status\":\"deleted\"}");
+}
+
+void handleRenameFile() {
+	if (!ensureStorageReady()) {
+		sendJsonResponse(503, "{\"error\":\"storage_unavailable\"}");
+		return;
+	}
+	String body = server.arg("plain");
+	StaticJsonDocument<256> doc;
+	if (deserializeJson(doc, body) || !doc.is<JsonObject>() ||
+		!doc["from"].is<const char*>() || !doc["to"].is<const char*>()) {
+		sendJsonResponse(400, "{\"error\":\"from_to_missing\"}");
+		return;
+	}
+	String from = sanitizeFilename(String(doc["from"].as<const char*>()));
+	String to = sanitizeFilename(String(doc["to"].as<const char*>()));
+	if (from == to) {
+		sendJsonResponse(200, "{\"status\":\"unchanged\"}");
+		return;
+	}
+	if (runningFile == from) {
+		sendJsonResponse(409, "{\"error\":\"file_running\"}");
+		return;
+	}
+	if (!LittleFS.exists(from)) {
+		sendJsonResponse(404, "{\"error\":\"file_not_found\"}");
+		return;
+	}
+	if (LittleFS.exists(to)) {
+		sendJsonResponse(409, "{\"error\":\"target_exists\"}");
+		return;
+	}
+	if (!LittleFS.rename(from, to)) {
+		sendJsonResponse(500, "{\"error\":\"rename_failed\"}");
+		return;
+	}
+	sendJsonResponse(200, "{\"status\":\"renamed\"}");
+}
+
+void handleFormatStorage() {
+	if (!formatStorage()) {
+		sendJsonResponse(500, "{\"status\":\"failed\",\"mounted\":false}");
+		return;
+	}
+	sendJsonResponse(200, "{\"status\":\"formatted\",\"mounted\":true}");
+}
+
 void setupWebServer() {
 	server.on("/api/status", HTTP_OPTIONS, handleOptions);
 	server.on("/api/status", HTTP_GET, []() {
-		StaticJsonDocument<320> doc;
+		StaticJsonDocument<512> doc;
 		doc["state"] = stateToString(currentState);
 		doc["wifi"] = (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED";
 		doc["sta_ip"] = WiFi.localIP().toString();
@@ -1082,6 +1292,11 @@ void setupWebServer() {
 		doc["gcode_feed"] = gcodeModalFeed;
 		doc["spindle"] = spindleEnabled ? "ON" : "OFF";
 		doc["gcode_lines"] = gcodeAcceptedLines;
+		doc["storage_mounted"] = storageMounted;
+		if (storageMounted) {
+			doc["storage_total"] = LittleFS.totalBytes();
+			doc["storage_used"] = LittleFS.usedBytes();
+		}
 		String out;
 		serializeJson(doc, out);
 		sendJsonResponse(200, out);
@@ -1303,11 +1518,24 @@ void setupWebServer() {
 		sendJsonResponse(200, "{\"status\":\"updated\"}");
 	});
 
+	server.on("/api/files", HTTP_OPTIONS, handleOptions);
+	server.on("/api/files", HTTP_GET, handleListFiles);
+
+	server.on("/api/file/delete", HTTP_OPTIONS, handleOptions);
+	server.on("/api/file/delete", HTTP_POST, handleDeleteFile);
+
+	server.on("/api/file/rename", HTTP_OPTIONS, handleOptions);
+	server.on("/api/file/rename", HTTP_POST, handleRenameFile);
+
+	server.on("/api/storage/format", HTTP_OPTIONS, handleOptions);
+	server.on("/api/storage/format", HTTP_POST, handleFormatStorage);
+
 	server.on("/upload", HTTP_OPTIONS, handleOptions);
 	server.on("/upload", HTTP_POST, []() {
 		if (!lastUploadOk) {
 			String out = String("{\"error\":\"") + lastUploadError + "\"}";
-			sendJsonResponse(413, out);
+			int code = (lastUploadError == "file_too_large") ? 413 : 500;
+			sendJsonResponse(code, out);
 			return;
 		}
 		sendJsonResponse(200, "{\"status\":\"uploaded\"}");
@@ -1439,9 +1667,7 @@ void setup() {
 		stepper3->setAcceleration(axisAcceleration);
 	}
 
-	if (!LittleFS.begin(true)) {
-		Serial.println("LittleFS mount failed");
-	}
+	mountStorage(true);
 	setupWiFi();
 	check_ota(otaConfig);
 	StaticJsonDocument<384> payload;

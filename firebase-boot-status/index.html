@@ -324,11 +324,12 @@
           title.className = "device-title";
           title.textContent = safeValue(record.device_id);
           const badge = document.createElement("div");
-          badge.className = "badge";
-          badge.textContent = safeValue(record.state || "READY");
-          if (!record.state) {
-            badge.classList.add("warn");
-          }
+            badge.className = "badge";
+            if (record.state) {
+            badge.textContent = safeValue(record.state);
+            } else {
+            badge.textContent = "READY";
+            }
           header.appendChild(title);
           header.appendChild(badge);
 

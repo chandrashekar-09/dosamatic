@@ -1,0 +1,77 @@
+Implementation Plan: Custom Shape Cooking Automation
+
+1. System Overview
+
+A high-precision XY(Z) motion system controlled by an ESP32. The user draws shapes in a Flutter app, which converts them to G-code. The G-code is uploaded to the ESP32 via HTTP and executed locally from internal storage (LittleFS) using hardware-timed pulses for maximum smoothness.
+
+2. Hardware Specification
+
+Controller: ESP32 (38-pin DevKit recommended).
+
+Stepper Drivers: A4988 or TMC2209 (Set to 1/16 microstepping).
+
+Axes: * X: Step (GPIO 32), Dir (GPIO 33), Limit (GPIO 16)
+
+Y: Step (GPIO 25), Dir (GPIO 26), Limit (GPIO 17)
+
+Z: Step (GPIO 27), Dir (GPIO 14)
+
+DC Motors: Controlled via MOSFETs on GPIO 12 and 13.
+
+Mechanical Limits: 14,000 steps max travel on X and Y.
+
+3. ESP32 Firmware Development (Arduino/C++)
+
+Core Libraries
+
+FastAccelStepper: For hardware-interrupt-based motion.
+
+GCodeParser: To interpret G0, G1, G4, M3, M5 commands.
+
+LittleFS: To store uploaded G-code recipes locally.
+
+ESPAsyncWebServer: To handle non-blocking file uploads.
+
+Firmware Logic Layers
+
+Homing State Machine: * Sequential homing (X then Y).
+
+Search at 1500 steps/s, backoff 400 steps, slow-touch at 300 steps/s.
+
+G-Code Executor: * Reads .gcode file line-by-line from LittleFS.
+
+Calculates targets for FastAccelStepper.
+
+Synchronizes multi-axis movement using moveTo() and isMoving() checks.
+
+DC Motor Control: * M3 Sxxx: Maps PWM to DC motor pins.
+
+M5: Hard stop for DC motors.
+
+4. Flutter App Development
+
+Drawing & Generation
+
+Canvas Widget: A CustomPainter to record touch points.
+
+Path Processing: * Simplify the path (RDP Algorithm) to reduce unnecessary points.
+
+Scale canvas coordinates (0-100%) to motor steps (0-14,000).
+
+G-Code Logic:
+
+Prepend: G21 (mm) or steps, G90 (Absolute).
+
+Body: Generate G1 X... Y... for each point.
+
+Append: G0 X7000 Y7000 (Return to center), M5 (Stop all).
+
+Communication Layer
+
+File Upload: Send G-code via multipart/form-data to /upload.
+
+Control Commands: * GET /run?file=jalebi.gcode
+
+GET /stop (Emergency Kill)
+
+GET /homing
