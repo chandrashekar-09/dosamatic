@@ -71,8 +71,8 @@ enum HomingPhase { HOMING_SEEK_FAST, HOMING_BACKOFF_FAST, HOMING_SEEK_SLOW, HOMI
 
 const long HOMING_TARGET = -1000000;
 const long HOMING_BACKOFF_STEPS = 400;
-const long HOMING_FAST_SPEED = 800;
-const long HOMING_SLOW_SPEED = 800;
+const long HOMING_FAST_SPEED = 300;
+const long HOMING_SLOW_SPEED = 300;
 const unsigned long HOMING_SWITCH_DEBOUNCE_MS = 20;
 const unsigned long WAIT_DELAY_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -122,6 +122,14 @@ unsigned long s1DebounceStart = 0;
 unsigned long s2DebounceStart = 0;
 unsigned long s3DebounceStart = 0;
 unsigned long waitStartTime = 0;
+bool plannerCommandInitialized = false;
+long lastPlannerTargetX = 0;
+long lastPlannerTargetY = 0;
+long lastPlannerTargetZ = 0;
+bool axisProfileInitialized = false;
+float lastAxisSpeed1 = 0.0f;
+float lastAxisSpeed2 = 0.0f;
+float lastAxisSpeed3 = 0.0f;
 
 unsigned long lastPlannerUs = 0;
 unsigned long lastWiFiReconnectAttempt = 0;
@@ -805,15 +813,40 @@ void applyAxisProfile(float requestedFeed) {
 	float f1 = clampf(requestedFeed, MIN_FEED_STEPS_PER_SEC, maxSpeed1);
 	float f2 = clampf(requestedFeed, MIN_FEED_STEPS_PER_SEC, maxSpeed2);
 	float f3 = clampf(requestedFeed, MIN_FEED_STEPS_PER_SEC, maxSpeed3);
-	if (stepper1) stepper1->setSpeedInHz(f1);
-	if (stepper2) stepper2->setSpeedInHz(f2);
-	if (stepper3) stepper3->setSpeedInHz(f3);
+	if (stepper1 && (!axisProfileInitialized || fabsf(f1 - lastAxisSpeed1) >= 0.5f)) {
+		stepper1->setSpeedInHz(f1);
+		lastAxisSpeed1 = f1;
+	}
+	if (stepper2 && (!axisProfileInitialized || fabsf(f2 - lastAxisSpeed2) >= 0.5f)) {
+		stepper2->setSpeedInHz(f2);
+		lastAxisSpeed2 = f2;
+	}
+	if (stepper3 && (!axisProfileInitialized || fabsf(f3 - lastAxisSpeed3) >= 0.5f)) {
+		stepper3->setSpeedInHz(f3);
+		lastAxisSpeed3 = f3;
+	}
+	axisProfileInitialized = true;
 }
 
 void commandPlannerPosition() {
-	if (stepper1) stepper1->moveTo(lroundf(plannerX));
-	if (stepper2) stepper2->moveTo(lroundf(plannerY));
-	if (stepper3) stepper3->moveTo(lroundf(plannerZ));
+	long targetX = lroundf(plannerX);
+	long targetY = lroundf(plannerY);
+	long targetZ = lroundf(plannerZ);
+
+	if (stepper1 && (!plannerCommandInitialized || targetX != lastPlannerTargetX)) {
+		stepper1->moveTo(targetX);
+	}
+	if (stepper2 && (!plannerCommandInitialized || targetY != lastPlannerTargetY)) {
+		stepper2->moveTo(targetY);
+	}
+	if (stepper3 && (!plannerCommandInitialized || targetZ != lastPlannerTargetZ)) {
+		stepper3->moveTo(targetZ);
+	}
+
+	lastPlannerTargetX = targetX;
+	lastPlannerTargetY = targetY;
+	lastPlannerTargetZ = targetZ;
+	plannerCommandInitialized = true;
 }
 
 float computeJunctionSpeed(const ActiveSegment& current, const Waypoint& nextPoint) {
@@ -983,16 +1016,17 @@ bool handleAxisHoming(FastAccelStepper* stepper, int limitPin, bool& homed, Homi
 
 	switch (phase) {
 		case HOMING_SEEK_FAST:
-			stepper->setSpeedInHz(HOMING_FAST_SPEED);
 			if (limitTriggered(limitPin)) {
 				stepper->stopMove();
 				stepper->setCurrentPosition(0);
+				stepper->setSpeedInHz(HOMING_FAST_SPEED);
 				stepper->moveTo(HOMING_BACKOFF_STEPS);
 				phase = HOMING_BACKOFF_FAST;
 				debounceStart = 0;
 				return false;
 			}
 			if (!stepper->isRunning()) {
+				stepper->setSpeedInHz(HOMING_FAST_SPEED);
 				stepper->moveTo(HOMING_TARGET);
 			}
 			return false;
@@ -1000,6 +1034,7 @@ bool handleAxisHoming(FastAccelStepper* stepper, int limitPin, bool& homed, Homi
 		case HOMING_BACKOFF_FAST:
 			if (stepper->isRunning()) return false;
 			if (limitTriggered(limitPin)) {
+				stepper->setSpeedInHz(HOMING_FAST_SPEED);
 				stepper->moveTo(HOMING_BACKOFF_STEPS + 200);
 				return false;
 			}
@@ -1008,12 +1043,12 @@ bool handleAxisHoming(FastAccelStepper* stepper, int limitPin, bool& homed, Homi
 			return false;
 
 		case HOMING_SEEK_SLOW:
-			stepper->setSpeedInHz(HOMING_SLOW_SPEED);
 			if (limitTriggered(limitPin)) {
 				if (debounceStart == 0) debounceStart = millis();
 				if (millis() - debounceStart >= HOMING_SWITCH_DEBOUNCE_MS) {
 					stepper->stopMove();
 					stepper->setCurrentPosition(0);
+					stepper->setSpeedInHz(HOMING_SLOW_SPEED);
 					stepper->moveTo(HOMING_BACKOFF_STEPS);
 					phase = HOMING_BACKOFF_SLOW;
 				}
@@ -1021,6 +1056,7 @@ bool handleAxisHoming(FastAccelStepper* stepper, int limitPin, bool& homed, Homi
 			}
 			debounceStart = 0;
 			if (!stepper->isRunning()) {
+				stepper->setSpeedInHz(HOMING_SLOW_SPEED);
 				stepper->moveTo(HOMING_TARGET);
 			}
 			return false;
@@ -1042,14 +1078,15 @@ void performHoming() {
 
 	if (!s1Homed) {
 		handleAxisHoming(stepper1, LIM1_PIN, s1Homed, s1Phase, s1DebounceStart);
-		return;
 	}
 	if (!s2Homed) {
 		handleAxisHoming(stepper2, LIM2_PIN, s2Homed, s2Phase, s2DebounceStart);
-		return;
 	}
 	if (!s3Homed) {
 		handleAxisHoming(stepper3, LIM3_PIN, s3Homed, s3Phase, s3DebounceStart);
+	}
+
+	if (!s1Homed || !s2Homed || !s3Homed) {
 		return;
 	}
 
@@ -1576,9 +1613,6 @@ void setupWebServer() {
 		s1DebounceStart = 0;
 		s2DebounceStart = 0;
 		s3DebounceStart = 0;
-		if (stepper1) stepper1->moveTo(HOMING_TARGET);
-		if (stepper2) stepper2->moveTo(HOMING_TARGET);
-		if (stepper3) stepper3->moveTo(HOMING_TARGET);
 		currentState = HOMING;
 		sendJsonResponse(200, "{\"status\":\"homing\"}");
 	});
@@ -1682,10 +1716,6 @@ void setup() {
 	send_ota_ack(otaConfig, payload);
 	setupWebServer();
 
-	if (stepper1) stepper1->moveTo(HOMING_TARGET);
-	if (stepper2) stepper2->moveTo(HOMING_TARGET);
-	if (stepper3) stepper3->moveTo(HOMING_TARGET);
-
 	Serial.println("Boot complete. Starting homing...");
 }
 
@@ -1722,6 +1752,7 @@ void loop() {
 				plannerTick(dt);
 				lastPlannerUs = nowUs;
 			}
+			yield();
 			break;
 		}
 	}
