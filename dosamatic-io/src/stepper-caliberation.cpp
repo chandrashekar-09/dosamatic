@@ -14,16 +14,17 @@
 
 #include "OtaService.h"
 
-const char* ssid = "IIIT-Guest";
-const char* password = "f6s68VHJ89mC";
+// const char* ssid = "IIIT-Guest";
+// const char* password = "f6s68VHJ89mC";
 
-// const char* ssid = "MADHU";
-// const char* password = "6303852931";
+const char* ssid = "MADHU";
+const char* password = "6303852931";
 
-const int CURRENT_VERSION = 9;
+const int CURRENT_VERSION = 8;
 const char* versionUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/var.txt";
 const char* firmwareUrl = "https://raw.githubusercontent.com/chandrashekar-09/dosamatic/main/firmware.bin";
-const char* deviceId = "test-006";
+// const char* deviceId = "test-001";
+const char* deviceId = "spm-001";
 
 // Firebase Realtime Database endpoint (write-once at boot)
 // Example: https://<project-id>-default-rtdb.<region>.firebasedatabase.app/boot_ack
@@ -44,7 +45,7 @@ const OtaConfig otaConfig = {
 
 #define STEP1_PIN 32
 #define DIR1_PIN  33
-#define LIM1_PIN  16 // change to 16 after testing 
+#define LIM1_PIN  16
 
 #define STEP2_PIN 25
 #define DIR2_PIN  26
@@ -1676,6 +1677,8 @@ void setup() {
 	}
 
 	mountStorage(true);
+
+	LittleFS.format(); //for testing, remove in production
 	setupWiFi();
 	check_ota(otaConfig);
 	StaticJsonDocument<384> payload;
