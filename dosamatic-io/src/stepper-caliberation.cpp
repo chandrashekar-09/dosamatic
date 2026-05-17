@@ -67,13 +67,12 @@ WebServer server(80);
 enum SystemState { HOMING, WAITING, READY, MOVING };
 SystemState currentState = HOMING;
 
-enum HomingPhase { HOMING_SEEK_FAST, HOMING_BACKOFF_FAST, HOMING_SEEK_SLOW, HOMING_BACKOFF_SLOW, HOMING_DONE };
+enum HomingPhase { HOMING_SEEK, HOMING_BACKOFF, HOMING_DONE };
 
 const long HOMING_TARGET = -1000000;
-const long HOMING_BACKOFF_STEPS = 400;
-const long HOMING_FAST_SPEED = 400;
-const long HOMING_SLOW_SPEED = 400;
-const unsigned long HOMING_SWITCH_DEBOUNCE_MS = 50;
+const long HOMING_BACKOFF_STEPS = 200;
+const long HOMING_SEEK_SPEED = 400;
+const unsigned long HOMING_SWITCH_DEBOUNCE_MS = 20;
 const unsigned long WAIT_DELAY_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
@@ -115,9 +114,9 @@ int dcPwm = 0;
 bool s1Homed = false;
 bool s2Homed = false;
 bool s3Homed = false;
-HomingPhase s1Phase = HOMING_SEEK_FAST;
-HomingPhase s2Phase = HOMING_SEEK_FAST;
-HomingPhase s3Phase = HOMING_SEEK_FAST;
+HomingPhase s1Phase = HOMING_SEEK;
+HomingPhase s2Phase = HOMING_SEEK;
+HomingPhase s3Phase = HOMING_SEEK;
 unsigned long s1DebounceStart = 0;
 unsigned long s2DebounceStart = 0;
 unsigned long s3DebounceStart = 0;
@@ -1015,54 +1014,29 @@ bool handleAxisHoming(FastAccelStepper* stepper, int limitPin, bool& homed, Homi
 	if (!stepper) return false;
 
 	switch (phase) {
-		case HOMING_SEEK_FAST:
-			if (limitTriggered(limitPin)) {
-				stepper->stopMove();
-				stepper->setCurrentPosition(0);
-				stepper->setSpeedInHz(HOMING_FAST_SPEED);
-				stepper->moveTo(HOMING_BACKOFF_STEPS);
-				phase = HOMING_BACKOFF_FAST;
-				debounceStart = 0;
-				return false;
-			}
-			if (!stepper->isRunning()) {
-				stepper->setSpeedInHz(HOMING_FAST_SPEED);
-				stepper->moveTo(HOMING_TARGET);
-			}
-			return false;
-
-		case HOMING_BACKOFF_FAST:
-			if (stepper->isRunning()) return false;
-			if (limitTriggered(limitPin)) {
-				stepper->setSpeedInHz(HOMING_FAST_SPEED);
-				stepper->moveTo(HOMING_BACKOFF_STEPS + 200);
-				return false;
-			}
-			phase = HOMING_SEEK_SLOW;
-			debounceStart = 0;
-			return false;
-
-		case HOMING_SEEK_SLOW:
+		case HOMING_SEEK:
 			if (limitTriggered(limitPin)) {
 				if (debounceStart == 0) debounceStart = millis();
 				if (millis() - debounceStart >= HOMING_SWITCH_DEBOUNCE_MS) {
 					stepper->stopMove();
 					stepper->setCurrentPosition(0);
-					stepper->setSpeedInHz(HOMING_SLOW_SPEED);
+					stepper->setSpeedInHz(HOMING_SEEK_SPEED);
 					stepper->moveTo(HOMING_BACKOFF_STEPS);
-					phase = HOMING_BACKOFF_SLOW;
+					phase = HOMING_BACKOFF;
+					debounceStart = 0;
 				}
 				return false;
 			}
 			debounceStart = 0;
 			if (!stepper->isRunning()) {
-				stepper->setSpeedInHz(HOMING_SLOW_SPEED);
+				stepper->setSpeedInHz(HOMING_SEEK_SPEED);
 				stepper->moveTo(HOMING_TARGET);
 			}
 			return false;
 
-		case HOMING_BACKOFF_SLOW:
+		case HOMING_BACKOFF:
 			if (stepper->isRunning()) return false;
+			stepper->setCurrentPosition(0);
 			homed = true;
 			phase = HOMING_DONE;
 			return true;
@@ -1607,9 +1581,9 @@ void setupWebServer() {
 		s1Homed = false;
 		s2Homed = false;
 		s3Homed = false;
-		s1Phase = HOMING_SEEK_FAST;
-		s2Phase = HOMING_SEEK_FAST;
-		s3Phase = HOMING_SEEK_FAST;
+		s1Phase = HOMING_SEEK;
+		s2Phase = HOMING_SEEK;
+		s3Phase = HOMING_SEEK;
 		s1DebounceStart = 0;
 		s2DebounceStart = 0;
 		s3DebounceStart = 0;
