@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -35,8 +35,7 @@ class DosamaticApp extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class Waypoint {
   final int x, y, z, speed;
-  const Waypoint(
-      {required this.x, required this.y, required this.z, this.speed = 0});
+  const Waypoint({required this.x, required this.y, required this.z, this.speed = 0});
 
   Map<String, int> toJson() => {'x': x, 'y': y, 'z': z, 'speed': speed};
 
@@ -57,84 +56,27 @@ class Waypoint {
 
 class PresetModel {
   final String id, name;
-  final List<PresetStep> steps;
-  const PresetModel(
-      {required this.id, required this.name, required this.steps});
+  final List<List<Waypoint>> steps;
+  const PresetModel({required this.id, required this.name, required this.steps});
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
-        'steps': steps.map((s) => s.toJson()).toList(),
+        'steps': steps.map((s) => s.map((p) => p.toJson()).toList()).toList(),
       };
 
   factory PresetModel.fromJson(Map<String, dynamic> j) {
     final rawSteps = (j['steps'] as List<dynamic>? ?? []);
     return PresetModel(
-      id: (j['id'] ?? DateTime.now().millisecondsSinceEpoch.toString())
-          .toString(),
+      id: (j['id'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString(),
       name: (j['name'] ?? 'Preset').toString(),
-      steps: rawSteps.map((s) => PresetStep.fromJson(s)).toList(),
+      steps: rawSteps
+          .map((s) => (s as List<dynamic>)
+              .map((p) => Waypoint.fromJson(p as Map<String, dynamic>))
+              .toList())
+          .toList(),
     );
   }
-}
-
-class PresetStep {
-  final String label;
-  final int feed;
-  final List<Waypoint> points;
-  final String gcode;
-
-  const PresetStep({
-    required this.label,
-    required this.feed,
-    required this.points,
-    required this.gcode,
-  });
-
-  int get pointCount => points.length;
-
-  Map<String, dynamic> toJson() => {
-        'label': label,
-        'feed': feed,
-        'points': points.map((p) => p.toJson()).toList(),
-        'gcode': gcode,
-      };
-
-  factory PresetStep.fromJson(dynamic raw) {
-    if (raw is List<dynamic>) {
-      final points =
-          raw.map((p) => Waypoint.fromJson(p as Map<String, dynamic>)).toList();
-      return PresetStep(
-        label: 'Legacy Step',
-        feed: points.isEmpty ? 0 : points.first.speed,
-        points: points,
-        gcode: '',
-      );
-    }
-    final j = raw as Map<String, dynamic>;
-    final points = (j['points'] as List<dynamic>? ?? [])
-        .map((p) => Waypoint.fromJson(p as Map<String, dynamic>))
-        .toList();
-    return PresetStep(
-      label: (j['label'] ?? 'Step').toString(),
-      feed: (j['feed'] as num?)?.round() ??
-          (points.isEmpty ? 0 : points.first.speed),
-      points: points,
-      gcode: (j['gcode'] ?? '').toString(),
-    );
-  }
-}
-
-class DeviceGcodeFile {
-  final String name;
-  final int size;
-
-  const DeviceGcodeFile({required this.name, required this.size});
-
-  factory DeviceGcodeFile.fromJson(Map<String, dynamic> j) => DeviceGcodeFile(
-        name: (j['name'] ?? '').toString(),
-        size: (j['size'] as num?)?.round() ?? 0,
-      );
 }
 
 enum ShapeType { line, square, triangle, circle, spiral, spinge, custom }
@@ -150,53 +92,49 @@ class ControllerPage extends StatefulWidget {
 
 class _ControllerPageState extends State<ControllerPage> {
   // ── Constants ──────────────────────────────────────────────────────────────
-  static const int _customTemplateMax = 1000;
-  static const int _maxImportedRawPoints = 5000;
-  static const int _firmwareQueueMax = 180;
-  static const int _minFeedStepsPerSec = 100;
-  static const int _maxFeedStepsPerSec = 12000;
-  static const double _curveChordErrorSteps = 0.25;
+  static const int _customTemplateMax        = 1000;
+  static const int _maxImportedRawPoints     = 5000;
+  static const int _firmwareQueueMax         = 180;
+  static const double _curveChordErrorSteps  = 0.25;
   // How many free slots we target before sending the next chunk
-  static const int _streamChunkSize = 60;
-  static const int _streamRefillThreshold = 40; // send when free >= this
-  static const String _defaultMdnsHost = 'dosamatic.local';
-  static const String _keyHost = 'dosamatic.host';
-  static const String _keyUseMdns = 'dosamatic.use_mdns';
-  static const String _keyPresets = 'dosamatic.saved_presets';
-  static const MethodChannel _saveFileChannel =
-      MethodChannel('dosamatic/save_file');
+  static const int _streamChunkSize          = 60;
+  static const int _streamRefillThreshold    = 40; // send when free >= this
+  static const String _defaultMdnsHost       = 'dosamatic.local';
+  static const String _keyHost               = 'dosamatic.host';
+  static const String _keyUseMdns            = 'dosamatic.use_mdns';
+  static const String _keyPresets            = 'dosamatic.saved_presets';
 
   // ── Device state ───────────────────────────────────────────────────────────
-  String _deviceState = 'UNKNOWN';
+  String _deviceState  = 'UNKNOWN';
   int _currentX = 0, _currentY = 0, _currentZ = 0;
   int _queueDepth = 0, _queueFree = _firmwareQueueMax;
   int _dcSpeed = 0;
   int _limitX = 14000, _limitY = 14000, _limitZ = 14000;
-  int _maxSpeed1 = 12000, _maxSpeed2 = 12000, _maxSpeed3 = 12000;
-  double _pathAccel = 18000.0;
-  double _junctionDev = 1.20;
+  int _maxSpeed1 = 2000, _maxSpeed2 = 2000, _maxSpeed3 = 2000;
+  double _pathAccel = 5000.0;
+  double _junctionDev = 0.05;
   bool _isConnected = false, _isFetchingStatus = false;
   int _selectedTab = 0;
 
   // ── Connection ─────────────────────────────────────────────────────────────
-  bool _useMdns = false;
+  bool   _useMdns    = false;
   String _manualHost = '';
 
   late Timer _pollingTimer;
 
   // ── Text controllers ───────────────────────────────────────────────────────
-  final _hostCtrl = TextEditingController();
-  final _limXCtrl = TextEditingController();
-  final _limYCtrl = TextEditingController();
-  final _limZCtrl = TextEditingController();
-  final _spdXCtrl = TextEditingController();
-  final _spdYCtrl = TextEditingController();
-  final _spdZCtrl = TextEditingController();
-  final _jogStepCtrl = TextEditingController();
-  final _manualSpdCtrl = TextEditingController();
-  final _dcSpeedCtrl = TextEditingController();
+  final _hostCtrl       = TextEditingController();
+  final _limXCtrl       = TextEditingController();
+  final _limYCtrl       = TextEditingController();
+  final _limZCtrl       = TextEditingController();
+  final _spdXCtrl       = TextEditingController();
+  final _spdYCtrl       = TextEditingController();
+  final _spdZCtrl       = TextEditingController();
+  final _jogStepCtrl    = TextEditingController();
+  final _manualSpdCtrl  = TextEditingController();
+  final _dcSpeedCtrl    = TextEditingController();
   final _presetNameCtrl = TextEditingController();
-  final _pathAccelCtrl = TextEditingController();
+  final _pathAccelCtrl  = TextEditingController();
   final _junctionDevCtrl = TextEditingController();
 
   final _limXFocus = FocusNode();
@@ -209,46 +147,49 @@ class _ControllerPageState extends State<ControllerPage> {
   final _junctionDevFocus = FocusNode();
 
   // ── Jog / manual ───────────────────────────────────────────────────────────
-  int _jogStep = 1000;
-  int _manualSpeed = 1200;
-  int _dcCommandSpeed = 120;
+  int  _jogStep    = 1000;
+  int  _manualSpeed = 1200;
+  int  _dcCommandSpeed = 120;
   bool _isSendingDcCommand = false;
 
   // ── Shape parameters ───────────────────────────────────────────────────────
-  ShapeType _shapeType = ShapeType.square;
-  double _shapeSize = 2000;
-  int _shapeZ = 0;
-  int _circleSegments = 72; // FIX: raised from 20 — adaptive override below
-  int _spiralTurns = 5;
-  int _spingeWaves = 4;
-  int _shapeOffsetX = 0;
-  int _shapeOffsetY = 0;
-  int _customDrawDensity = 6;
-  bool _circleClockwise = true;
-  bool _isImportingDraw = false;
-  bool _isStreaming = false;
-  bool _isUploading = false;
+  ShapeType _shapeType      = ShapeType.square;
+  double    _shapeSize      = 2000;
+  int       _shapeZ         = 0;
+  int       _circleSegments = 72;  // FIX: raised from 20 — adaptive override below
+  int       _spiralTurns    = 5;
+  int       _spingeWaves    = 4;
+  int       _shapeOffsetX   = 0;
+  int       _shapeOffsetY   = 0;
+  int       _customDrawDensity = 6;
+  bool      _circleClockwise   = true;
+  bool      _isImportingDraw   = false;
+  bool      _isStreaming        = false;
+  bool      _isUploading        = false;
 
-  /// Single source of truth for generated shape/preset feed rate.
-  int _masterFeedRate = 7000;
+  /// Master speed scale 0.1 – 2.0.  All per-shape speeds are multiplied by this.
+  double _masterSpeedScale = 1.0;
+
+  final Map<ShapeType, int> _shapeSpeedMap = {
+    ShapeType.line:     1200,
+    ShapeType.square:   1200,
+    ShapeType.triangle: 1200,
+    ShapeType.circle:   1200,
+    ShapeType.spiral:   1200,
+    ShapeType.spinge:   1200,
+    ShapeType.custom:   1200,
+  };
 
   // ── Custom / preset ─────────────────────────────────────────────────────────
   final List<Waypoint> _customPoints = [
-    const Waypoint(x: 0, y: 0, z: 0),
-    const Waypoint(x: _customTemplateMax, y: 0, z: 0),
-    const Waypoint(x: _customTemplateMax, y: _customTemplateMax, z: 0),
-    const Waypoint(x: 0, y: _customTemplateMax, z: 0),
-    const Waypoint(x: 0, y: 0, z: 0),
+    const Waypoint(x: 0,                      y: 0,                      z: 0),
+    const Waypoint(x: _customTemplateMax,      y: 0,                      z: 0),
+    const Waypoint(x: _customTemplateMax,      y: _customTemplateMax,     z: 0),
+    const Waypoint(x: 0,                      y: _customTemplateMax,     z: 0),
+    const Waypoint(x: 0,                      y: 0,                      z: 0),
   ];
-  List<PresetStep> _draftPresetSteps = [];
-  List<PresetModel> _presets = [];
-  List<DeviceGcodeFile> _deviceFiles = [];
-  bool _isLoadingFiles = false;
-  bool _isFormattingStorage = false;
-  bool _storageMounted = false;
-  int _storageUsed = 0;
-  int _storageTotal = 0;
-  String _storageError = '';
+  List<List<Waypoint>> _draftPresetSteps = [];
+  List<PresetModel>    _presets          = [];
 
   // ─────────────────────────────────────────────────────────────────────────
   // LIFECYCLE
@@ -256,18 +197,18 @@ class _ControllerPageState extends State<ControllerPage> {
   @override
   void initState() {
     super.initState();
-    _limXCtrl.text = _limitX.toString();
-    _limYCtrl.text = _limitY.toString();
-    _limZCtrl.text = _limitZ.toString();
-    _spdXCtrl.text = _maxSpeed1.toString();
-    _spdYCtrl.text = _maxSpeed2.toString();
-    _spdZCtrl.text = _maxSpeed3.toString();
-    _jogStepCtrl.text = _jogStep.toString();
+    _limXCtrl.text      = _limitX.toString();
+    _limYCtrl.text      = _limitY.toString();
+    _limZCtrl.text      = _limitZ.toString();
+    _spdXCtrl.text      = _maxSpeed1.toString();
+    _spdYCtrl.text      = _maxSpeed2.toString();
+    _spdZCtrl.text      = _maxSpeed3.toString();
+    _jogStepCtrl.text   = _jogStep.toString();
     _manualSpdCtrl.text = _manualSpeed.toString();
-    _dcSpeedCtrl.text = _dcCommandSpeed.toString();
+    _dcSpeedCtrl.text   = _dcCommandSpeed.toString();
     _pathAccelCtrl.text = _pathAccel.toStringAsFixed(0);
     _junctionDevCtrl.text = _junctionDev.toStringAsFixed(3);
-    _hostCtrl.text = _manualHost;
+    _hostCtrl.text      = _manualHost;
     _loadLocalSettings();
 
     _pollingTimer = Timer.periodic(
@@ -279,31 +220,17 @@ class _ControllerPageState extends State<ControllerPage> {
   void dispose() {
     _pollingTimer.cancel();
     for (final c in [
-      _hostCtrl,
-      _limXCtrl,
-      _limYCtrl,
-      _limZCtrl,
-      _spdXCtrl,
-      _spdYCtrl,
-      _spdZCtrl,
-      _jogStepCtrl,
-      _manualSpdCtrl,
-      _dcSpeedCtrl,
-      _presetNameCtrl,
-      _pathAccelCtrl,
-      _junctionDevCtrl,
+      _hostCtrl, _limXCtrl, _limYCtrl, _limZCtrl,
+      _spdXCtrl, _spdYCtrl, _spdZCtrl,
+      _jogStepCtrl, _manualSpdCtrl, _dcSpeedCtrl, _presetNameCtrl,
+      _pathAccelCtrl, _junctionDevCtrl,
     ]) {
       c.dispose();
     }
     for (final f in [
-      _limXFocus,
-      _limYFocus,
-      _limZFocus,
-      _spdXFocus,
-      _spdYFocus,
-      _spdZFocus,
-      _pathAccelFocus,
-      _junctionDevFocus,
+      _limXFocus, _limYFocus, _limZFocus,
+      _spdXFocus, _spdYFocus, _spdZFocus,
+      _pathAccelFocus, _junctionDevFocus,
     ]) {
       f.dispose();
     }
@@ -314,7 +241,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // HELPERS
   // ─────────────────────────────────────────────────────────────────────────
   String get _activeHost => _useMdns ? _defaultMdnsHost : _manualHost.trim();
-  String get _apiUrl => _activeHost.isEmpty ? '' : 'http://$_activeHost/api';
+  String get _apiUrl     => _activeHost.isEmpty ? '' : 'http://$_activeHost/api';
 
   bool get _isBusyState =>
       _deviceState == 'HOMING' || _deviceState == 'WAITING';
@@ -329,9 +256,6 @@ class _ControllerPageState extends State<ControllerPage> {
     if (v is num) return v.round();
     return fallback;
   }
-
-  int _clampFeed(int speed) =>
-      speed.clamp(_minFeedStepsPerSec, _maxFeedStepsPerSec).toInt();
 
   String _normalizeHost(String input) {
     var host = input.trim();
@@ -365,7 +289,7 @@ class _ControllerPageState extends State<ControllerPage> {
       final host = prefs.getString(_keyHost);
       if (host != null && host.isNotEmpty) {
         final normalized = _normalizeHost(host);
-        _manualHost = normalized;
+        _manualHost  = normalized;
         _hostCtrl.text = normalized;
       }
       final useMdns = prefs.getBool(_keyUseMdns);
@@ -437,17 +361,14 @@ class _ControllerPageState extends State<ControllerPage> {
       if (res.statusCode == 200) {
         final d = jsonDecode(res.body) as Map<String, dynamic>;
         setState(() {
-          _isConnected = true;
-          _deviceState = (d['state'] ?? 'UNKNOWN').toString();
-          _currentX = _asInt(d['m1_pos'], 0);
-          _currentY = _asInt(d['m2_pos'], 0);
-          _currentZ = _asInt(d['m3_pos'], 0);
-          _queueDepth = _asInt(d['queue_depth'], 0);
-          _queueFree = _asInt(d['queue_free'], _firmwareQueueMax);
-          _dcSpeed = _asInt(d['dc_pwm'], 0);
-          _storageMounted = d['storage_mounted'] == true;
-          _storageTotal = _asInt(d['storage_total'], _storageTotal);
-          _storageUsed = _asInt(d['storage_used'], _storageUsed);
+          _isConnected  = true;
+          _deviceState  = (d['state'] ?? 'UNKNOWN').toString();
+          _currentX     = _asInt(d['m1_pos'],   0);
+          _currentY     = _asInt(d['m2_pos'],   0);
+          _currentZ     = _asInt(d['m3_pos'],   0);
+          _queueDepth   = _asInt(d['queue_depth'], 0);
+          _queueFree    = _asInt(d['queue_free'],  _firmwareQueueMax);
+          _dcSpeed      = _asInt(d['dc_pwm'], 0);
 
           if (d['max1'] != null) {
             _limitX = _asInt(d['max1'], _limitX);
@@ -554,8 +475,7 @@ class _ControllerPageState extends State<ControllerPage> {
               retries++;
               await _fetchStatus();
             } else {
-              _snack(
-                  'Firmware rejected chunk (${res.statusCode}): ${res.body}');
+              _snack('Firmware rejected chunk (${res.statusCode}): ${res.body}');
               return false;
             }
           } on TimeoutException {
@@ -603,6 +523,7 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
+
   // ─────────────────────────────────────────────────────────────────────────
   // GCODE BUILDER
   // ─────────────────────────────────────────────────────────────────────────
@@ -617,7 +538,7 @@ class _ControllerPageState extends State<ControllerPage> {
 
     int? lastFeed;
     for (final pt in path) {
-      final speed = _clampFeed(pt.speed > 0 ? pt.speed : _masterFeedRate);
+      final speed = _scaledSpeed(pt.speed > 0 ? pt.speed : _manualSpeed);
       if (lastFeed != speed) {
         buf.writeln('F$speed');
         lastFeed = speed;
@@ -632,7 +553,7 @@ class _ControllerPageState extends State<ControllerPage> {
   String _buildCircleGcode({bool includeFooter = false}) {
     final int size = _shapeSize.round().clamp(100, math.min(_limitX, _limitY));
     final int z = _shapeZ.clamp(0, _limitZ);
-    final int speed = _clampFeed(_masterFeedRate);
+    final int speed = _scaledSpeed(_speedForShape(_shapeType));
 
     final double radius = size / 2.0;
     final double cx = radius + _shapeOffsetX;
@@ -654,10 +575,8 @@ class _ControllerPageState extends State<ControllerPage> {
     buf.writeln('F$speed');
     buf.writeln('G1 X${_fmtG(startX)} Y${_fmtG(startY)} Z$z');
     final code = _circleClockwise ? 'G2' : 'G3';
-    buf.writeln(
-        '$code X${_fmtG(midX)} Y${_fmtG(midY)} Z$z I${_fmtG(i1)} J${_fmtG(j1)}');
-    buf.writeln(
-        '$code X${_fmtG(startX)} Y${_fmtG(startY)} Z$z I${_fmtG(i2)} J${_fmtG(j2)}');
+    buf.writeln('$code X${_fmtG(midX)} Y${_fmtG(midY)} Z$z I${_fmtG(i1)} J${_fmtG(j1)}');
+    buf.writeln('$code X${_fmtG(startX)} Y${_fmtG(startY)} Z$z I${_fmtG(i2)} J${_fmtG(j2)}');
     if (includeFooter) {
       final int cxHome = (_limitX / 2).round();
       final int cyHome = (_limitY / 2).round();
@@ -678,55 +597,6 @@ class _ControllerPageState extends State<ControllerPage> {
     return '$gcode\nG0 X$cxHome Y$cyHome Z$_shapeZ\nM5\n';
   }
 
-  String _safeJobFilename(String prefix) {
-    final cleanPrefix = prefix
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_')
-        .replaceAll(RegExp(r'_+'), '_')
-        .replaceAll(RegExp(r'^_|_$'), '');
-    final p = cleanPrefix.isEmpty ? 'job' : cleanPrefix;
-    final now = DateTime.now();
-    final stamp =
-        '${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
-    return '${p.substring(0, math.min(12, p.length))}_$stamp.gco';
-  }
-
-  String _presetProgram(List<PresetStep> steps, {bool includeFooter = true}) {
-    final buf = StringBuffer()
-      ..writeln('G21')
-      ..writeln('G90');
-
-    for (final step in steps) {
-      final gcode = step.gcode.trim();
-      if (gcode.isNotEmpty) {
-        for (final raw in const LineSplitter().convert(gcode)) {
-          final line = raw.trim();
-          if (line.isEmpty) continue;
-          final upper = line.toUpperCase();
-          if (upper == 'G21' || upper == 'G90' || upper == 'M5') continue;
-          if (upper.startsWith('G0 ') && includeFooter) {
-            final homeX = (_limitX / 2).round().toString();
-            final homeY = (_limitY / 2).round().toString();
-            if (upper.contains('X$homeX') && upper.contains('Y$homeY')) {
-              continue;
-            }
-          }
-          buf.writeln(line);
-        }
-      } else {
-        buf.write(_buildGcodeProgram(step.points, resetModal: false));
-      }
-    }
-
-    if (includeFooter) {
-      final int cxHome = (_limitX / 2).round();
-      final int cyHome = (_limitY / 2).round();
-      buf.writeln('G0 X$cxHome Y$cyHome Z$_shapeZ');
-      buf.writeln('M5');
-    }
-    return buf.toString();
-  }
-
   Future<bool> _uploadAndRunGcode(String gcode, String namePrefix) async {
     if (!_isConnected) {
       _snack('Device not connected.');
@@ -739,23 +609,19 @@ class _ControllerPageState extends State<ControllerPage> {
 
     setState(() => _isUploading = true);
     try {
-      final filename = _safeJobFilename(namePrefix);
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final filename = '$namePrefix-$ts.gcode';
       final uri = Uri.parse('http://$_activeHost/upload');
       final req = http.MultipartRequest('POST', uri);
-      req.files.add(http.MultipartFile.fromString(
-        'file',
-        gcode,
-        filename: filename,
-      ));
+      final bytes = Uint8List.fromList(utf8.encode(gcode));
+      req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
       final resp = await req.send();
       if (resp.statusCode != 200) {
-        final body = await resp.stream.bytesToString();
-        _snack('Upload failed: ${resp.statusCode} $body');
+        _snack('Upload failed: ${resp.statusCode}');
         return false;
       }
       final runUri = Uri.http(_activeHost, '/run', {'file': filename});
-      final runResp =
-          await http.get(runUri).timeout(const Duration(seconds: 3));
+      final runResp = await http.get(runUri).timeout(const Duration(seconds: 3));
       if (runResp.statusCode != 200) {
         _snack('Run failed: ${runResp.statusCode}');
         return false;
@@ -769,9 +635,13 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
+  int _scaledSpeed(int speed) =>
+      (speed * _masterSpeedScale).round().clamp(100, 12000);
+
   void _snack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg)));
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -832,13 +702,14 @@ class _ControllerPageState extends State<ControllerPage> {
       _snack('Set a valid host first.');
       return;
     }
-    final int max1 = int.tryParse(_limXCtrl.text) ?? _limitX;
-    final int max2 = int.tryParse(_limYCtrl.text) ?? _limitY;
-    final int max3 = int.tryParse(_limZCtrl.text) ?? _limitZ;
+    final int max1   = int.tryParse(_limXCtrl.text) ?? _limitX;
+    final int max2   = int.tryParse(_limYCtrl.text) ?? _limitY;
+    final int max3   = int.tryParse(_limZCtrl.text) ?? _limitZ;
     final int speed1 = int.tryParse(_spdXCtrl.text) ?? _maxSpeed1;
     final int speed2 = int.tryParse(_spdYCtrl.text) ?? _maxSpeed2;
     final int speed3 = int.tryParse(_spdZCtrl.text) ?? _maxSpeed3;
-    final double pathAccel = double.tryParse(_pathAccelCtrl.text) ?? _pathAccel;
+    final double pathAccel =
+        double.tryParse(_pathAccelCtrl.text) ?? _pathAccel;
     final double junctionDev =
         double.tryParse(_junctionDevCtrl.text) ?? _junctionDev;
     try {
@@ -847,12 +718,8 @@ class _ControllerPageState extends State<ControllerPage> {
             Uri.parse('$_apiUrl/limits'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'max1': max1,
-              'max2': max2,
-              'max3': max3,
-              'speed1': speed1,
-              'speed2': speed2,
-              'speed3': speed3,
+              'max1': max1, 'max2': max2, 'max3': max3,
+              'speed1': speed1, 'speed2': speed2, 'speed3': speed3,
               'path_accel': pathAccel,
               'junction_dev': junctionDev,
             }),
@@ -887,8 +754,7 @@ class _ControllerPageState extends State<ControllerPage> {
   /// → N ≥ π / arccos(1 − 0.5/r)
   int _adaptiveCircleSegments(double radius) {
     if (radius < 1) return 72;
-    final double minN =
-        math.pi / math.acos(1.0 - _curveChordErrorSteps / radius);
+    final double minN = math.pi / math.acos(1.0 - _curveChordErrorSteps / radius);
     // User slider acts as a multiplier (quality), min 72 for smoothness
     final int adaptive = minN.ceil().clamp(72, 1000);
     // User's slider value scales quality: _circleSegments is 72–160 user quality
@@ -937,160 +803,140 @@ class _ControllerPageState extends State<ControllerPage> {
     return _dedupePath(out);
   }
 
-  void _addPointIfChanged(
-      List<Waypoint> out, double x, double y, int z, int speed) {
+  void _addPointIfChanged(List<Waypoint> out, double x, double y, int z, int speed) {
     final next = Waypoint(
       x: x.round().clamp(0, _limitX),
       y: y.round().clamp(0, _limitY),
       z: z,
       speed: speed,
     );
-    if (out.isEmpty ||
-        out.last.x != next.x ||
-        out.last.y != next.y ||
-        out.last.z != next.z) {
+    if (out.isEmpty || out.last.x != next.x || out.last.y != next.y || out.last.z != next.z) {
       out.add(next);
     }
   }
 
   List<Waypoint> _shapeBasePath() {
-    final int size = _shapeSize.round().clamp(100, math.min(_limitX, _limitY));
-    final int z = _shapeZ.clamp(0, _limitZ);
-    final int speed = _clampFeed(_masterFeedRate);
+    final int  size  = _shapeSize.round().clamp(100, math.min(_limitX, _limitY));
+    final int  z     = _shapeZ.clamp(0, _limitZ);
+    final int  speed = _shapeSpeedMap[_shapeType] ?? 1200;
 
     switch (_shapeType) {
       // ── Line ─────────────────────────────────────────────────────────────
       case ShapeType.line:
         return [
-          Waypoint(x: 0, y: 0, z: z, speed: speed),
+          Waypoint(x: 0,    y: 0, z: z, speed: speed),
           Waypoint(x: size, y: 0, z: z, speed: speed),
         ];
 
       // ── Square ───────────────────────────────────────────────────────────
       case ShapeType.square:
         return [
-          Waypoint(x: 0, y: 0, z: z, speed: speed),
-          Waypoint(x: size, y: 0, z: z, speed: speed),
+          Waypoint(x: 0,    y: 0,    z: z, speed: speed),
+          Waypoint(x: size, y: 0,    z: z, speed: speed),
           Waypoint(x: size, y: size, z: z, speed: speed),
-          Waypoint(x: 0, y: size, z: z, speed: speed),
-          Waypoint(x: 0, y: 0, z: z, speed: speed),
+          Waypoint(x: 0,    y: size, z: z, speed: speed),
+          Waypoint(x: 0,    y: 0,    z: z, speed: speed),
         ];
 
       // ── Triangle ─────────────────────────────────────────────────────────
       case ShapeType.triangle:
         return [
-          Waypoint(x: 0, y: 0, z: z, speed: speed),
-          Waypoint(x: size, y: 0, z: z, speed: speed),
+          Waypoint(x: 0,        y: 0,    z: z, speed: speed),
+          Waypoint(x: size,     y: 0,    z: z, speed: speed),
           Waypoint(x: size ~/ 2, y: size, z: z, speed: speed),
-          Waypoint(x: 0, y: 0, z: z, speed: speed),
+          Waypoint(x: 0,        y: 0,    z: z, speed: speed),
         ];
 
       // ── Circle (FIX: adaptive high-resolution segments) ──────────────────
-      case ShapeType.circle:
-        {
-          final double radius = size / 2.0;
-          final double cx = radius, cy = radius;
-          final int segs = _adaptiveCircleSegments(radius);
-          final pts = <Waypoint>[];
+      case ShapeType.circle: {
+        final double radius  = size / 2.0;
+        final double cx      = radius, cy = radius;
+        final int    segs    = _adaptiveCircleSegments(radius);
+        final pts            = <Waypoint>[];
 
-          for (int i = 0; i <= segs; i++) {
-            final angle = (2.0 * math.pi * i) / segs;
-            _addPointIfChanged(
-              pts,
-              cx + radius * math.cos(angle),
-              cy + radius * math.sin(angle),
-              z,
-              speed,
-            );
-          }
-          return pts;
+        for (int i = 0; i <= segs; i++) {
+          final angle = (2.0 * math.pi * i) / segs;
+          _addPointIfChanged(
+            pts,
+            cx + radius * math.cos(angle),
+            cy + radius * math.sin(angle),
+            z, speed,
+          );
         }
+        return pts;
+      }
 
       // ── Spiral ───────────────────────────────────────────────────────────
-      case ShapeType.spiral:
-        {
-          final double maxR = size / 2.0;
-          final double cx = maxR, cy = maxR;
-          // Adaptive: same arc-error criterion per turn
-          final int perTurn = _adaptiveCircleSegments(maxR);
-          final int samples = (perTurn * _spiralTurns).clamp(72, 2000);
-          final pts = <Waypoint>[];
-          for (int i = 0; i <= samples; i++) {
-            final double t = i / samples;
-            final double a = 2.0 * math.pi * _spiralTurns * t;
-            final double r = maxR * t;
-            _addPointIfChanged(
-                pts, cx + r * math.cos(a), cy + r * math.sin(a), z, speed);
-          }
-          return pts;
+      case ShapeType.spiral: {
+        final double maxR   = size / 2.0;
+        final double cx     = maxR, cy = maxR;
+        // Adaptive: same arc-error criterion per turn
+        final int perTurn   = _adaptiveCircleSegments(maxR);
+        final int samples   = (perTurn * _spiralTurns).clamp(72, 2000);
+        final pts           = <Waypoint>[];
+        for (int i = 0; i <= samples; i++) {
+          final double t = i / samples;
+          final double a = 2.0 * math.pi * _spiralTurns * t;
+          final double r = maxR * t;
+          _addPointIfChanged(pts, cx + r * math.cos(a), cy + r * math.sin(a), z, speed);
         }
+        return pts;
+      }
 
       // ── Spinge (sine wave) ───────────────────────────────────────────────
-      case ShapeType.spinge:
-        {
-          final double width = size.toDouble();
-          final double amp = size / 4.0;
-          final double midY = size / 2.0;
-          // Higher resolution for smooth waves
-          final int samples =
-              (_adaptiveCircleSegments(size / 2.0) * _spingeWaves)
-                  .clamp(72, 2000);
-          final pts = <Waypoint>[];
-          for (int i = 0; i <= samples; i++) {
-            final double t = i / samples;
-            _addPointIfChanged(
-              pts,
-              width * t,
-              midY + amp * math.sin(2.0 * math.pi * _spingeWaves * t),
-              z,
-              speed,
-            );
-          }
-          return pts;
+      case ShapeType.spinge: {
+        final double width = size.toDouble();
+        final double amp   = size / 4.0;
+        final double midY  = size / 2.0;
+        // Higher resolution for smooth waves
+        final int samples  = (_adaptiveCircleSegments(size / 2.0) * _spingeWaves)
+            .clamp(72, 2000);
+        final pts          = <Waypoint>[];
+        for (int i = 0; i <= samples; i++) {
+          final double t = i / samples;
+          _addPointIfChanged(
+            pts,
+            width * t,
+            midY + amp * math.sin(2.0 * math.pi * _spingeWaves * t),
+            z, speed,
+          );
         }
+        return pts;
+      }
 
       // ── Custom ───────────────────────────────────────────────────────────
-      case ShapeType.custom:
-        {
-          final int stride = _customDrawDensity.clamp(1, 20);
-          final sampled = <Waypoint>[];
-          for (int i = 0; i < _customPoints.length; i += stride) {
-            sampled.add(_customPoints[i]);
-          }
-          if (sampled.isEmpty || sampled.last != _customPoints.last) {
-            sampled.add(_customPoints.last);
-          }
-          final mapped = sampled
-              .map((p) => Waypoint(
-                    x: ((p.x / _customTemplateMax) * size)
-                        .round()
-                        .clamp(0, _limitX),
-                    y: ((p.y / _customTemplateMax) * size)
-                        .round()
-                        .clamp(0, _limitY),
-                    z: z,
-                    speed: speed,
-                  ))
-              .toList();
-          final deduped = _dedupePath(mapped);
-          final double maxStep =
-              (size / (30.0 * (21 - _customDrawDensity))).clamp(2.0, 120.0);
-          return _resamplePathByMaxStep(deduped, maxStep);
+      case ShapeType.custom: {
+        final int stride = _customDrawDensity.clamp(1, 20);
+        final sampled    = <Waypoint>[];
+        for (int i = 0; i < _customPoints.length; i += stride) {
+          sampled.add(_customPoints[i]);
         }
+        if (sampled.isEmpty || sampled.last != _customPoints.last) {
+          sampled.add(_customPoints.last);
+        }
+        final mapped = sampled.map((p) => Waypoint(
+              x: ((p.x / _customTemplateMax) * size).round().clamp(0, _limitX),
+              y: ((p.y / _customTemplateMax) * size).round().clamp(0, _limitY),
+              z: z,
+              speed: speed,
+            )).toList();
+        final deduped = _dedupePath(mapped);
+        final double maxStep = (size / (30.0 * (21 - _customDrawDensity)))
+            .clamp(2.0, 120.0);
+        return _resamplePathByMaxStep(deduped, maxStep);
+      }
     }
   }
 
   List<Waypoint> _shapePath() {
     final base = _shapeBasePath();
     if (base.isEmpty) return base;
-    final shifted = base
-        .map((p) => Waypoint(
-              x: (p.x + _shapeOffsetX).clamp(0, _limitX),
-              y: (p.y + _shapeOffsetY).clamp(0, _limitY),
-              z: p.z,
-              speed: p.speed,
-            ))
-        .toList();
+    final shifted = base.map((p) => Waypoint(
+          x: (p.x + _shapeOffsetX).clamp(0, _limitX),
+          y: (p.y + _shapeOffsetY).clamp(0, _limitY),
+          z: p.z,
+          speed: p.speed,
+        )).toList();
 
     final deduped = _dedupePath(shifted);
     if (_shapeType == ShapeType.circle ||
@@ -1103,6 +949,12 @@ class _ControllerPageState extends State<ControllerPage> {
     return deduped;
   }
 
+  int _speedForShape(ShapeType s) => _shapeSpeedMap[s] ?? 1200;
+
+  void _setSpeedForShape(ShapeType s, int speed) {
+    setState(() => _shapeSpeedMap[s] = speed.clamp(100, 10000));
+  }
+
   void _moveShapeByCanvasDelta(double dxUnits, double dyUnits) {
     final base = _shapeBasePath();
     if (base.isEmpty) return;
@@ -1111,10 +963,10 @@ class _ControllerPageState extends State<ControllerPage> {
     final minY = base.map((p) => p.y).reduce(math.min);
     final maxY = base.map((p) => p.y).reduce(math.max);
     setState(() {
-      _shapeOffsetX =
-          (_shapeOffsetX + dxUnits.round()).clamp(-minX, _limitX - maxX);
-      _shapeOffsetY =
-          (_shapeOffsetY + dyUnits.round()).clamp(-minY, _limitY - maxY);
+      _shapeOffsetX = (_shapeOffsetX + dxUnits.round())
+          .clamp(-minX, _limitX - maxX);
+      _shapeOffsetY = (_shapeOffsetY + dyUnits.round())
+          .clamp(-minY, _limitY - maxY);
     });
   }
 
@@ -1141,19 +993,6 @@ class _ControllerPageState extends State<ControllerPage> {
     try {
       final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
       final name = 'dosamatic_${_shapeType.name}_$ts.gcode';
-      if (Platform.isAndroid) {
-        final saved = await _saveFileChannel.invokeMethod<String>(
-          'saveGcode',
-          {'fileName': name, 'content': gcode},
-        );
-        if (!mounted) return;
-        if (saved == null || saved.isEmpty) {
-          _snack('Export canceled.');
-        } else {
-          _snack('G-code saved: $saved');
-        }
-        return;
-      }
       final path = await FilePicker.platform.saveFile(
         dialogTitle: 'Save G-code',
         fileName: name,
@@ -1167,199 +1006,15 @@ class _ControllerPageState extends State<ControllerPage> {
       final file = File(path);
       await file.writeAsString(gcode);
       if (mounted) _snack('G-code saved: ${file.path}');
-    } on PlatformException catch (e) {
-      if (!mounted) return;
-      if (e.code == 'CANCELED') {
-        _snack('Export canceled.');
-      } else {
-        _snack('Failed to save G-code: ${e.message ?? e.code}');
-      }
     } catch (e) {
       if (mounted) _snack('Failed to save G-code: $e');
-    }
-  }
-
-  Future<void> _refreshDeviceFiles() async {
-    if (_activeHost.isEmpty || _isLoadingFiles) return;
-    setState(() {
-      _isLoadingFiles = true;
-      _storageError = '';
-    });
-    try {
-      final res = await http
-          .get(Uri.parse('$_apiUrl/files'))
-          .timeout(const Duration(seconds: 4));
-      if (!mounted) return;
-      final body =
-          res.body.isEmpty ? <String, dynamic>{} : jsonDecode(res.body);
-      if (res.statusCode == 200 && body is Map<String, dynamic>) {
-        final files = (body['files'] as List<dynamic>? ?? [])
-            .map((f) => DeviceGcodeFile.fromJson(f as Map<String, dynamic>))
-            .where((f) => f.name.isNotEmpty)
-            .toList()
-          ..sort((a, b) => a.name.compareTo(b.name));
-        setState(() {
-          _deviceFiles = files;
-          _storageMounted = body['mounted'] == true;
-          _storageTotal = _asInt(body['total'], 0);
-          _storageUsed = _asInt(body['used'], 0);
-        });
-      } else {
-        setState(() {
-          _deviceFiles = [];
-          _storageError = res.body.isEmpty ? 'List failed' : res.body;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _deviceFiles = [];
-          _storageError = 'Storage list error: $e';
-        });
-      }
-    } finally {
-      if (mounted) setState(() => _isLoadingFiles = false);
-    }
-  }
-
-  Future<void> _runDeviceFile(String name) async {
-    if (_isBusyState || _isStreaming || _isUploading) {
-      _snack('Device busy. Wait for READY.');
-      return;
-    }
-    try {
-      final res = await http
-          .get(Uri.http(_activeHost, '/run', {'file': name}))
-          .timeout(const Duration(seconds: 3));
-      if (!mounted) return;
-      if (res.statusCode == 200) {
-        _snack('Running $name');
-        _fetchStatus();
-      } else {
-        _snack('Run failed: ${res.body}');
-      }
-    } catch (e) {
-      if (mounted) _snack('Run error: $e');
-    }
-  }
-
-  Future<void> _deleteDeviceFile(String name) async {
-    try {
-      final res = await http
-          .post(
-            Uri.parse('$_apiUrl/file/delete'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'name': name}),
-          )
-          .timeout(const Duration(seconds: 4));
-      if (!mounted) return;
-      if (res.statusCode == 200) {
-        _snack('Deleted $name');
-        _refreshDeviceFiles();
-      } else {
-        _snack('Delete failed: ${res.body}');
-      }
-    } catch (e) {
-      if (mounted) _snack('Delete error: $e');
-    }
-  }
-
-  Future<void> _renameDeviceFile(String from) async {
-    final ctrl = TextEditingController(text: from.replaceFirst('/', ''));
-    final next = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename G-code'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'File name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-            child: const Text('Rename'),
-          ),
-        ],
-      ),
-    );
-    ctrl.dispose();
-    if (next == null || next.isEmpty) return;
-
-    try {
-      final res = await http
-          .post(
-            Uri.parse('$_apiUrl/file/rename'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'from': from, 'to': next}),
-          )
-          .timeout(const Duration(seconds: 4));
-      if (!mounted) return;
-      if (res.statusCode == 200) {
-        _snack('Renamed.');
-        _refreshDeviceFiles();
-      } else {
-        _snack('Rename failed: ${res.body}');
-      }
-    } catch (e) {
-      if (mounted) _snack('Rename error: $e');
-    }
-  }
-
-  Future<void> _formatDeviceStorage() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Repair ESP32 storage?'),
-        content: const Text(
-            'This formats LittleFS and deletes stored G-code files.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Format'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    setState(() => _isFormattingStorage = true);
-    try {
-      final res = await http
-          .post(Uri.parse('$_apiUrl/storage/format'))
-          .timeout(const Duration(seconds: 8));
-      if (!mounted) return;
-      if (res.statusCode == 200) {
-        _snack('Storage formatted.');
-        _refreshDeviceFiles();
-      } else {
-        _snack('Format failed: ${res.body}');
-      }
-    } catch (e) {
-      if (mounted) _snack('Format error: $e');
-    } finally {
-      if (mounted) setState(() => _isFormattingStorage = false);
     }
   }
 
   void _addCurrentShapeToDraft() {
     final path = _shapePath();
     if (path.isEmpty) return;
-    final step = PresetStep(
-      label: _shapeLabel(_shapeType),
-      feed: _masterFeedRate,
-      points: path,
-      gcode: _buildGcodeForCurrentShape(includeFooter: false),
-    );
-    setState(() => _draftPresetSteps = [..._draftPresetSteps, step]);
+    setState(() => _draftPresetSteps = [..._draftPresetSteps, path]);
     _snack('Added step ${_draftPresetSteps.length} to preset draft.');
   }
 
@@ -1372,9 +1027,10 @@ class _ControllerPageState extends State<ControllerPage> {
       _snack('Already running.');
       return;
     }
-    if (preset.steps.isEmpty) return;
-    final gcode = _presetProgram(preset.steps);
-    final ok = await _uploadAndRunGcode(gcode, preset.name);
+    final merged = preset.steps.expand((s) => s).toList();
+    if (merged.isEmpty) return;
+    final gcode = _buildGcodeProgram(merged, resetModal: true);
+    final ok = await _uploadAndRunGcode('$gcode\nM5\n', preset.name);
     if (mounted && ok) _snack('Preset "${preset.name}" running.');
   }
 
@@ -1385,8 +1041,8 @@ class _ControllerPageState extends State<ControllerPage> {
       return;
     }
     final preset = PresetModel(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      name: name,
+      id:    DateTime.now().millisecondsSinceEpoch.toString(),
+      name:  name,
       steps: _draftPresetSteps,
     );
     setState(() {
@@ -1428,9 +1084,8 @@ class _ControllerPageState extends State<ControllerPage> {
         _customPoints
           ..clear()
           ..addAll(mapped);
-        _shapeType = ShapeType.custom;
-        _shapeSize =
-            _shapeSize.clamp(300, math.min(_limitX, _limitY).toDouble());
+        _shapeType    = ShapeType.custom;
+        _shapeSize    = _shapeSize.clamp(300, math.min(_limitX, _limitY).toDouble());
         _shapeOffsetX = 0;
         _shapeOffsetY = 0;
       });
@@ -1471,21 +1126,17 @@ class _ControllerPageState extends State<ControllerPage> {
     double minX = pts.first.dx, minY = pts.first.dy;
     double maxX = minX, maxY = minY;
     for (final p in pts) {
-      minX = math.min(minX, p.dx);
-      minY = math.min(minY, p.dy);
-      maxX = math.max(maxX, p.dx);
-      maxY = math.max(maxY, p.dy);
+      minX = math.min(minX, p.dx); minY = math.min(minY, p.dy);
+      maxX = math.max(maxX, p.dx); maxY = math.max(maxY, p.dy);
     }
     final spanX = math.max(1.0, maxX - minX);
     final spanY = math.max(1.0, maxY - minY);
     return pts
         .map((p) => Waypoint(
               x: (((p.dx - minX) / spanX) * _customTemplateMax)
-                  .round()
-                  .clamp(0, _customTemplateMax),
+                  .round().clamp(0, _customTemplateMax),
               y: (((p.dy - minY) / spanY) * _customTemplateMax)
-                  .round()
-                  .clamp(0, _customTemplateMax),
+                  .round().clamp(0, _customTemplateMax),
               z: 0,
               speed: 0,
             ))
@@ -1505,8 +1156,8 @@ class _ControllerPageState extends State<ControllerPage> {
   }
 
   void _addCustomPoint() {
-    setState(() => _customPoints.add(Waypoint(
-        x: _customTemplateMax ~/ 2, y: _customTemplateMax ~/ 2, z: 0)));
+    setState(() => _customPoints
+        .add(Waypoint(x: _customTemplateMax ~/ 2, y: _customTemplateMax ~/ 2, z: 0)));
   }
 
   void _removeCustomPoint(int index) {
@@ -1516,20 +1167,13 @@ class _ControllerPageState extends State<ControllerPage> {
 
   String _shapeLabel(ShapeType t) {
     switch (t) {
-      case ShapeType.line:
-        return 'Line';
-      case ShapeType.square:
-        return 'Square';
-      case ShapeType.triangle:
-        return 'Triangle';
-      case ShapeType.circle:
-        return 'Circle';
-      case ShapeType.spiral:
-        return 'Spiral';
-      case ShapeType.spinge:
-        return 'Spinge';
-      case ShapeType.custom:
-        return 'Custom';
+      case ShapeType.line:     return 'Line';
+      case ShapeType.square:   return 'Square';
+      case ShapeType.triangle: return 'Triangle';
+      case ShapeType.circle:   return 'Circle';
+      case ShapeType.spiral:   return 'Spiral';
+      case ShapeType.spinge:   return 'Spinge';
+      case ShapeType.custom:   return 'Custom';
     }
   }
 
@@ -1554,8 +1198,7 @@ class _ControllerPageState extends State<ControllerPage> {
                         style: Theme.of(context).textTheme.titleLarge),
                     if (_isStreaming)
                       const SizedBox(
-                        width: 20,
-                        height: 20,
+                        width: 20, height: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
                   ],
@@ -1601,8 +1244,36 @@ class _ControllerPageState extends State<ControllerPage> {
           ]),
           const SizedBox(height: 16),
 
+          // ── Master speed scale ──────────────────────────────────────────
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Master Speed Scale: ${_masterSpeedScale.toStringAsFixed(2)}×',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const Text(
+                    'Scales all shape & jog speeds. Does not affect firmware limits.',
+                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                  Slider(
+                    min: 0.1, max: 2.0, divisions: 38,
+                    value: _masterSpeedScale,
+                    label: '${_masterSpeedScale.toStringAsFixed(2)}×',
+                    onChanged: (v) => setState(() => _masterSpeedScale = v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
           // ── Jog controls ───────────────────────────────────────────────
-          Text('Manual Jog', style: Theme.of(context).textTheme.titleMedium),
+          Text('Manual Jog',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Row(children: [
             const Text('Step:'),
@@ -1616,9 +1287,7 @@ class _ControllerPageState extends State<ControllerPage> {
                     isDense: true, border: OutlineInputBorder()),
                 onChanged: (v) {
                   final p = int.tryParse(v.trim());
-                  if (p != null && p > 0) {
-                    setState(() => _jogStep = p.clamp(1, 50000));
-                  }
+                  if (p != null && p > 0) setState(() => _jogStep = p.clamp(1, 50000));
                 },
               ),
             ),
@@ -1634,9 +1303,7 @@ class _ControllerPageState extends State<ControllerPage> {
                     isDense: true, border: OutlineInputBorder()),
                 onChanged: (v) {
                   final p = int.tryParse(v.trim());
-                  if (p != null && p > 0) {
-                    setState(() => _manualSpeed = p.clamp(100, 10000));
-                  }
+                  if (p != null && p > 0) setState(() => _manualSpeed = p.clamp(100, 10000));
                 },
               ),
             ),
@@ -1644,11 +1311,7 @@ class _ControllerPageState extends State<ControllerPage> {
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _buildJogButtons('X'),
-              _buildJogButtons('Y'),
-              _buildJogButtons('Z')
-            ],
+            children: [_buildJogButtons('X'), _buildJogButtons('Y'), _buildJogButtons('Z')],
           ),
           const SizedBox(height: 16),
 
@@ -1659,14 +1322,11 @@ class _ControllerPageState extends State<ControllerPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('DC Motor',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  Text('DC Motor', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   Text('Current speed: $_dcSpeed'),
                   Slider(
-                    min: 0,
-                    max: 255,
-                    divisions: 255,
+                    min: 0, max: 255, divisions: 255,
                     value: _dcCommandSpeed.toDouble(),
                     onChanged: (v) => setState(() {
                       _dcCommandSpeed = v.round();
@@ -1751,55 +1411,24 @@ class _ControllerPageState extends State<ControllerPage> {
           ),
           const SizedBox(height: 12),
 
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    const Icon(Icons.speed, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Master Speed: $_masterFeedRate steps/s',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ]),
-                  Slider(
-                    min: _minFeedStepsPerSec.toDouble(),
-                    max: _maxFeedStepsPerSec.toDouble(),
-                    divisions: 119,
-                    value: _masterFeedRate
-                        .clamp(_minFeedStepsPerSec, _maxFeedStepsPerSec)
-                        .toDouble(),
-                    label: '$_masterFeedRate steps/s',
-                    onChanged: (v) => setState(() {
-                      _masterFeedRate = _clampFeed(v.round());
-                    }),
-                  ),
-                  Text(
-                    'One feed rate for all generated shapes and preset steps.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
+          // Speed slider for current shape
+          Text('Speed: ${_speedForShape(_shapeType)} steps/s  '
+              '→ scaled: ${_scaledSpeed(_speedForShape(_shapeType))} steps/s'),
+          Slider(
+            min: 100, max: 10000, divisions: 99,
+            value: _speedForShape(_shapeType).toDouble(),
+            onChanged: (v) => _setSpeedForShape(_shapeType, v.round()),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 4),
 
           // Shape type picker
           DropdownButtonFormField<ShapeType>(
             value: _shapeType,
             decoration: const InputDecoration(labelText: 'Shape Type'),
             items: ShapeType.values
-                .map((t) =>
-                    DropdownMenuItem(value: t, child: Text(_shapeLabel(t))))
+                .map((t) => DropdownMenuItem(value: t, child: Text(_shapeLabel(t))))
                 .toList(),
-            onChanged: (v) {
-              if (v != null) setState(() => _shapeType = v);
-            },
+            onChanged: (v) { if (v != null) setState(() => _shapeType = v); },
           ),
           const SizedBox(height: 12),
 
@@ -1816,8 +1445,7 @@ class _ControllerPageState extends State<ControllerPage> {
           // Z
           Text('Z: $_shapeZ'),
           Slider(
-            min: 0,
-            max: _limitZ.toDouble(),
+            min: 0, max: _limitZ.toDouble(),
             value: _shapeZ.toDouble().clamp(0.0, _limitZ.toDouble()),
             onChanged: (v) => setState(() => _shapeZ = v.round()),
           ),
@@ -1827,9 +1455,7 @@ class _ControllerPageState extends State<ControllerPage> {
             Text('Circle quality (min segments: $adaptSegs adaptive):'
                 ' ×${(_circleSegments / 72.0).toStringAsFixed(2)}'),
             Slider(
-              min: 72,
-              max: 160,
-              divisions: 88,
+              min: 72, max: 160, divisions: 88,
               value: _circleSegments.toDouble(),
               onChanged: (v) => setState(() => _circleSegments = v.round()),
             ),
@@ -1844,44 +1470,29 @@ class _ControllerPageState extends State<ControllerPage> {
 
           if (_shapeType == ShapeType.spiral) ...[
             Text('Turns: $_spiralTurns'),
-            Slider(
-                min: 2,
-                max: 12,
-                divisions: 10,
+            Slider(min: 2, max: 12, divisions: 10,
                 value: _spiralTurns.toDouble(),
                 onChanged: (v) => setState(() => _spiralTurns = v.round())),
             Text('Resolution per turn: $_circleSegments'),
-            Slider(
-                min: 36,
-                max: 160,
-                divisions: 124,
+            Slider(min: 36, max: 160, divisions: 124,
                 value: _circleSegments.toDouble().clamp(36, 160),
                 onChanged: (v) => setState(() => _circleSegments = v.round())),
           ],
 
           if (_shapeType == ShapeType.spinge) ...[
             Text('Waves: $_spingeWaves'),
-            Slider(
-                min: 1,
-                max: 12,
-                divisions: 11,
+            Slider(min: 1, max: 12, divisions: 11,
                 value: _spingeWaves.toDouble(),
                 onChanged: (v) => setState(() => _spingeWaves = v.round())),
             Text('Points per wave: $_circleSegments'),
-            Slider(
-                min: 36,
-                max: 160,
-                divisions: 124,
+            Slider(min: 36, max: 160, divisions: 124,
                 value: _circleSegments.toDouble().clamp(36, 160),
                 onChanged: (v) => setState(() => _circleSegments = v.round())),
           ],
 
           if (_shapeType == ShapeType.custom) ...[
             Text('Density: $_customDrawDensity (1=highest, 20=lowest)'),
-            Slider(
-                min: 1,
-                max: 20,
-                divisions: 19,
+            Slider(min: 1, max: 20, divisions: 19,
                 value: _customDrawDensity.toDouble(),
                 onChanged: (v) =>
                     setState(() => _customDrawDensity = v.round())),
@@ -1889,9 +1500,7 @@ class _ControllerPageState extends State<ControllerPage> {
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
                 child: Row(children: [
-                  SizedBox(
-                      width: 18,
-                      height: 18,
+                  SizedBox(width: 18, height: 18,
                       child: CircularProgressIndicator(strokeWidth: 2)),
                   SizedBox(width: 12),
                   Text('Importing drawing...'),
@@ -1909,10 +1518,8 @@ class _ControllerPageState extends State<ControllerPage> {
             const SizedBox(height: 4),
             for (int i = 0; i < _customPoints.length; i++)
               _CustomPointEditor(
-                index: i,
-                point: _customPoints[i],
-                limitX: _customTemplateMax,
-                limitY: _customTemplateMax,
+                index: i, point: _customPoints[i],
+                limitX: _customTemplateMax, limitY: _customTemplateMax,
                 limitZ: _limitZ,
                 onChanged: (x, y, z) => _updateCustomPoint(i, x: x, y: y, z: z),
                 onRemove: () => _removeCustomPoint(i),
@@ -1929,15 +1536,12 @@ class _ControllerPageState extends State<ControllerPage> {
           Row(children: [
             Expanded(
               child: ElevatedButton.icon(
-                onPressed: (_isStreaming || _isUploading)
-                    ? null
-                    : _executeCurrentShape,
+                onPressed: (_isStreaming || _isUploading) ? null : _executeCurrentShape,
                 icon: (_isStreaming || _isUploading)
                     ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
+                        width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2,
+                            color: Colors.white))
                     : const Icon(Icons.play_arrow),
                 label: Text((_isStreaming || _isUploading)
                     ? 'Uploading…'
@@ -1968,8 +1572,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // BUILD — PRESETS PAGE
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildPresetsPage() {
-    final draftTotal =
-        _draftPresetSteps.fold<int>(0, (s, step) => s + step.pointCount);
+    final draftTotal = _draftPresetSteps.fold<int>(0, (s, step) => s + step.length);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -1992,10 +1595,8 @@ class _ControllerPageState extends State<ControllerPage> {
                   for (int i = 0; i < _draftPresetSteps.length; i++)
                     ListTile(
                       dense: true,
-                      title:
-                          Text('Step ${i + 1}: ${_draftPresetSteps[i].label}'),
-                      subtitle: Text(
-                          '${_draftPresetSteps[i].pointCount} waypoints  •  F${_draftPresetSteps[i].feed}'),
+                      title: Text('Step ${i + 1}'),
+                      subtitle: Text('${_draftPresetSteps[i].length} waypoints'),
                       trailing: IconButton(
                         icon: const Icon(Icons.delete_outline),
                         onPressed: () =>
@@ -2005,7 +1606,8 @@ class _ControllerPageState extends State<ControllerPage> {
                   TextField(
                     controller: _presetNameCtrl,
                     decoration: const InputDecoration(
-                        labelText: 'Preset name', hintText: 'My Sequence'),
+                        labelText: 'Preset name',
+                        hintText: 'My Sequence'),
                   ),
                   const SizedBox(height: 8),
                   ElevatedButton.icon(
@@ -2018,7 +1620,8 @@ class _ControllerPageState extends State<ControllerPage> {
             ),
           ),
           const SizedBox(height: 16),
-          Text('Saved Presets', style: Theme.of(context).textTheme.titleMedium),
+          Text('Saved Presets',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           if (_presets.isEmpty)
             const Text('No presets saved yet.')
@@ -2029,14 +1632,13 @@ class _ControllerPageState extends State<ControllerPage> {
                   title: Text(preset.name),
                   subtitle: Text(
                     '${preset.steps.length} steps  •  '
-                    '${preset.steps.fold<int>(0, (s, step) => s + step.pointCount)} total pts',
+                    '${preset.steps.fold<int>(0, (s, step) => s + step.length)} total pts',
                   ),
                   trailing: Wrap(spacing: 4, children: [
                     IconButton(
                       icon: (_isStreaming || _isUploading)
                           ? const SizedBox(
-                              width: 18,
-                              height: 18,
+                              width: 18, height: 18,
                               child: CircularProgressIndicator(strokeWidth: 2))
                           : const Icon(Icons.play_arrow),
                       onPressed: (_isStreaming || _isUploading)
@@ -2046,116 +1648,6 @@ class _ControllerPageState extends State<ControllerPage> {
                     IconButton(
                       icon: const Icon(Icons.delete_outline),
                       onPressed: () => _deletePreset(preset.id),
-                    ),
-                  ]),
-                ),
-              ),
-        ],
-      ),
-    );
-  }
-
-  String _fmtBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
-  }
-
-  Widget _buildFilesPage() {
-    final usedText = _storageTotal > 0
-        ? '${_fmtBytes(_storageUsed)} / ${_fmtBytes(_storageTotal)}'
-        : 'Unknown capacity';
-
-    return RefreshIndicator(
-      onRefresh: _refreshDeviceFiles,
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(children: [
-                    Icon(
-                      _storageMounted ? Icons.sd_storage : Icons.error_outline,
-                      color: _storageMounted ? Colors.green : Colors.red,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _storageMounted
-                            ? 'ESP32 G-code Storage'
-                            : 'Storage unavailable',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'Refresh',
-                      onPressed: _isLoadingFiles ? null : _refreshDeviceFiles,
-                      icon: _isLoadingFiles
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.refresh),
-                    ),
-                  ]),
-                  const SizedBox(height: 4),
-                  Text(usedText),
-                  if (_storageError.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Text(_storageError,
-                        style: const TextStyle(color: Colors.red)),
-                  ],
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed:
-                        _isFormattingStorage ? null : _formatDeviceStorage,
-                    icon: _isFormattingStorage
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.build),
-                    label: const Text('Repair / Format Storage'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          if (_deviceFiles.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text('No G-code files on ESP32.'),
-            )
-          else
-            for (final file in _deviceFiles)
-              Card(
-                child: ListTile(
-                  title: Text(file.name),
-                  subtitle: Text(_fmtBytes(file.size)),
-                  trailing: Wrap(spacing: 2, children: [
-                    IconButton(
-                      tooltip: 'Run',
-                      icon: const Icon(Icons.play_arrow),
-                      onPressed: (_isStreaming || _isUploading)
-                          ? null
-                          : () => _runDeviceFile(file.name),
-                    ),
-                    IconButton(
-                      tooltip: 'Rename',
-                      icon: const Icon(Icons.drive_file_rename_outline),
-                      onPressed: () => _renameDeviceFile(file.name),
-                    ),
-                    IconButton(
-                      tooltip: 'Delete',
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () => _deleteDeviceFile(file.name),
                     ),
                   ]),
                 ),
@@ -2188,7 +1680,8 @@ class _ControllerPageState extends State<ControllerPage> {
               controller: _hostCtrl,
               enabled: !_useMdns,
               decoration: const InputDecoration(
-                  labelText: 'Manual IP / Host', hintText: '192.168.1.100'),
+                  labelText: 'Manual IP / Host',
+                  hintText: '192.168.1.100'),
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
@@ -2197,58 +1690,37 @@ class _ControllerPageState extends State<ControllerPage> {
               label: const Text('Apply Connection'),
             ),
             const Divider(height: 28),
-            TextField(
-                controller: _limXCtrl,
-                focusNode: _limXFocus,
+            TextField(controller: _limXCtrl, focusNode: _limXFocus,
                 decoration: const InputDecoration(labelText: 'Max limit X'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 8),
-            TextField(
-                controller: _limYCtrl,
-                focusNode: _limYFocus,
+            TextField(controller: _limYCtrl, focusNode: _limYFocus,
                 decoration: const InputDecoration(labelText: 'Max limit Y'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 8),
-            TextField(
-                controller: _limZCtrl,
-                focusNode: _limZFocus,
+            TextField(controller: _limZCtrl, focusNode: _limZFocus,
                 decoration: const InputDecoration(labelText: 'Max limit Z'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 12),
-            TextField(
-                controller: _spdXCtrl,
-                focusNode: _spdXFocus,
-                decoration:
-                    const InputDecoration(labelText: 'Max speed X (steps/s)'),
+            TextField(controller: _spdXCtrl, focusNode: _spdXFocus,
+                decoration: const InputDecoration(labelText: 'Max speed X (steps/s)'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 8),
-            TextField(
-                controller: _spdYCtrl,
-                focusNode: _spdYFocus,
-                decoration:
-                    const InputDecoration(labelText: 'Max speed Y (steps/s)'),
+            TextField(controller: _spdYCtrl, focusNode: _spdYFocus,
+                decoration: const InputDecoration(labelText: 'Max speed Y (steps/s)'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 8),
-            TextField(
-                controller: _spdZCtrl,
-                focusNode: _spdZFocus,
-                decoration:
-                    const InputDecoration(labelText: 'Max speed Z (steps/s)'),
+            TextField(controller: _spdZCtrl, focusNode: _spdZFocus,
+                decoration: const InputDecoration(labelText: 'Max speed Z (steps/s)'),
                 keyboardType: TextInputType.number),
             const SizedBox(height: 12),
-            TextField(
-                controller: _pathAccelCtrl,
-                focusNode: _pathAccelFocus,
-                decoration:
-                    const InputDecoration(labelText: 'Path accel (steps/s²)'),
-                keyboardType: TextInputType.number),
+            TextField(controller: _pathAccelCtrl, focusNode: _pathAccelFocus,
+              decoration: const InputDecoration(labelText: 'Path accel (steps/s²)'),
+              keyboardType: TextInputType.number),
             const SizedBox(height: 8),
-            TextField(
-                controller: _junctionDevCtrl,
-                focusNode: _junctionDevFocus,
-                decoration:
-                    const InputDecoration(labelText: 'Junction dev (steps)'),
-                keyboardType: TextInputType.number),
+            TextField(controller: _junctionDevCtrl, focusNode: _junctionDevFocus,
+              decoration: const InputDecoration(labelText: 'Junction dev (steps)'),
+              keyboardType: TextInputType.number),
             const SizedBox(height: 12),
             ElevatedButton.icon(
               onPressed: _setLimits,
@@ -2257,7 +1729,7 @@ class _ControllerPageState extends State<ControllerPage> {
             ),
             const SizedBox(height: 16),
             Text('API endpoint: ${_apiUrl.isEmpty ? "(not set)" : _apiUrl}',
-                style: Theme.of(context).textTheme.bodySmall),
+              style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
       ),
@@ -2269,12 +1741,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // ─────────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      _buildHomePage(),
-      _buildShapesPage(),
-      _buildPresetsPage(),
-      _buildFilesPage(),
-    ];
+    final pages = [_buildHomePage(), _buildShapesPage(), _buildPresetsPage()];
     final wifiColor = _isConnected ? Colors.green : Colors.red;
 
     return Scaffold(
@@ -2288,8 +1755,7 @@ class _ControllerPageState extends State<ControllerPage> {
               padding: EdgeInsets.symmetric(horizontal: 8),
               child: Center(
                 child: SizedBox(
-                  width: 18,
-                  height: 18,
+                  width: 18, height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
               ),
@@ -2306,16 +1772,11 @@ class _ControllerPageState extends State<ControllerPage> {
       body: IndexedStack(index: _selectedTab, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedTab,
-        onDestinationSelected: (i) {
-          setState(() => _selectedTab = i);
-          if (i == 3) _refreshDeviceFiles();
-        },
+        onDestinationSelected: (i) => setState(() => _selectedTab = i),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
           NavigationDestination(icon: Icon(Icons.polyline), label: 'Shapes'),
-          NavigationDestination(
-              icon: Icon(Icons.playlist_play), label: 'Presets'),
-          NavigationDestination(icon: Icon(Icons.folder), label: 'Files'),
+          NavigationDestination(icon: Icon(Icons.playlist_play), label: 'Presets'),
         ],
       ),
     );
@@ -2326,26 +1787,18 @@ class _ControllerPageState extends State<ControllerPage> {
   // ─────────────────────────────────────────────────────────────────────────
   Widget _posWidget(String label, int pos, int max) => Column(
         children: [
-          Text(label,
-              style:
-                  const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          Text('$pos',
-              style: const TextStyle(fontSize: 18, color: Colors.blue)),
-          Text('/$max',
-              style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          Text(label, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+          Text('$pos', style: const TextStyle(fontSize: 18, color: Colors.blue)),
+          Text('/$max', style: const TextStyle(fontSize: 11, color: Colors.grey)),
         ],
       );
 
   Widget _buildJogButtons(String axis) => Column(
         children: [
-          IconButton(
-              icon: const Icon(Icons.arrow_drop_up, size: 36),
+          IconButton(icon: const Icon(Icons.arrow_drop_up, size: 36),
               onPressed: () => _jog(axis, _jogStep)),
-          Text(axis,
-              style:
-                  const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          IconButton(
-              icon: const Icon(Icons.arrow_drop_down, size: 36),
+          Text(axis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          IconButton(icon: const Icon(Icons.arrow_drop_down, size: 36),
               onPressed: () => _jog(axis, -_jogStep)),
         ],
       );
@@ -2362,13 +1815,9 @@ class _CustomPointEditor extends StatelessWidget {
   final VoidCallback onRemove;
 
   const _CustomPointEditor({
-    required this.index,
-    required this.point,
-    required this.limitX,
-    required this.limitY,
-    required this.limitZ,
-    required this.onChanged,
-    required this.onRemove,
+    required this.index, required this.point,
+    required this.limitX, required this.limitY, required this.limitZ,
+    required this.onChanged, required this.onRemove,
   });
 
   @override
@@ -2382,41 +1831,35 @@ class _CustomPointEditor extends StatelessWidget {
             Text('P${index + 1}',
                 style: const TextStyle(fontWeight: FontWeight.bold)),
             const Spacer(),
-            IconButton(
-                onPressed: onRemove,
+            IconButton(onPressed: onRemove,
                 icon: const Icon(Icons.delete_outline, size: 20)),
           ]),
           Row(children: [
-            Expanded(
-                child: TextFormField(
+            Expanded(child: TextFormField(
               key: ValueKey('x-$index-${point.x}'),
               initialValue: point.x.toString(),
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'X', isDense: true),
               onFieldSubmitted: (v) => onChanged(
-                  (int.tryParse(v) ?? point.x).clamp(0, limitX),
-                  point.y,
-                  point.z),
+                (int.tryParse(v) ?? point.x).clamp(0, limitX), point.y, point.z),
             )),
             const SizedBox(width: 6),
-            Expanded(
-                child: TextFormField(
+            Expanded(child: TextFormField(
               key: ValueKey('y-$index-${point.y}'),
               initialValue: point.y.toString(),
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'Y', isDense: true),
-              onFieldSubmitted: (v) => onChanged(point.x,
-                  (int.tryParse(v) ?? point.y).clamp(0, limitY), point.z),
+              onFieldSubmitted: (v) => onChanged(
+                point.x, (int.tryParse(v) ?? point.y).clamp(0, limitY), point.z),
             )),
             const SizedBox(width: 6),
-            Expanded(
-                child: TextFormField(
+            Expanded(child: TextFormField(
               key: ValueKey('z-$index-${point.z}'),
               initialValue: point.z.toString(),
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'Z', isDense: true),
-              onFieldSubmitted: (v) => onChanged(point.x, point.y,
-                  (int.tryParse(v) ?? point.z).clamp(0, limitZ)),
+              onFieldSubmitted: (v) => onChanged(
+                point.x, point.y, (int.tryParse(v) ?? point.z).clamp(0, limitZ)),
             )),
           ]),
         ]),
@@ -2435,9 +1878,7 @@ class ShapePreview extends StatelessWidget {
 
   const ShapePreview({
     super.key,
-    required this.points,
-    required this.maxX,
-    required this.maxY,
+    required this.points, required this.maxX, required this.maxY,
     required this.onPanInCanvasUnits,
   });
 
@@ -2473,16 +1914,12 @@ class _ShapePainter extends CustomPainter {
         Offset.zero & size, Paint()..color = const Color(0xFFF8FAFB));
     canvas.drawRect(drawRect, Paint()..color = const Color(0xFFF0F3F4));
 
-    final gridPaint = Paint()
-      ..color = Colors.grey.shade300
-      ..strokeWidth = 0.5;
+    final gridPaint = Paint()..color = Colors.grey.shade300..strokeWidth = 0.5;
     for (int i = 0; i <= 10; i++) {
       final dx = drawRect.left + drawRect.width * i / 10;
       final dy = drawRect.top + drawRect.height * i / 10;
-      canvas.drawLine(
-          Offset(dx, drawRect.top), Offset(dx, drawRect.bottom), gridPaint);
-      canvas.drawLine(
-          Offset(drawRect.left, dy), Offset(drawRect.right, dy), gridPaint);
+      canvas.drawLine(Offset(dx, drawRect.top), Offset(dx, drawRect.bottom), gridPaint);
+      canvas.drawLine(Offset(drawRect.left, dy), Offset(drawRect.right, dy), gridPaint);
     }
     canvas.drawRect(
         drawRect,
@@ -2495,10 +1932,8 @@ class _ShapePainter extends CustomPainter {
 
     final path = Path();
     for (int i = 0; i < points.length; i++) {
-      final px =
-          drawRect.left + (points[i].x / math.max(1, maxX)) * drawRect.width;
-      final py =
-          drawRect.top + (points[i].y / math.max(1, maxY)) * drawRect.height;
+      final px = drawRect.left + (points[i].x / math.max(1, maxX)) * drawRect.width;
+      final py = drawRect.top  + (points[i].y / math.max(1, maxY)) * drawRect.height;
       i == 0 ? path.moveTo(px, py) : path.lineTo(px, py);
     }
     canvas.drawPath(
@@ -2513,7 +1948,7 @@ class _ShapePainter extends CustomPainter {
       final ptPaint = Paint()..color = Colors.deepOrange;
       for (final p in points) {
         final px = drawRect.left + (p.x / math.max(1, maxX)) * drawRect.width;
-        final py = drawRect.top + (p.y / math.max(1, maxY)) * drawRect.height;
+        final py = drawRect.top  + (p.y / math.max(1, maxY)) * drawRect.height;
         canvas.drawCircle(Offset(px, py), 2.5, ptPaint);
       }
     }
@@ -2533,8 +1968,7 @@ class _ShapePainter extends CustomPainter {
           style: const TextStyle(fontSize: 10, color: Colors.black87)),
       textDirection: TextDirection.ltr,
     )..layout();
-    xLabel.paint(
-        canvas, Offset(drawRect.right - xLabel.width, drawRect.top - 14));
+    xLabel.paint(canvas, Offset(drawRect.right - xLabel.width, drawRect.top - 14));
   }
 
   @override
@@ -2544,17 +1978,15 @@ class _ShapePainter extends CustomPainter {
 
 Rect _computePlotRect(Size size, int maxX, int maxY) {
   const double padding = 24;
-  final aW = math.max(1.0, size.width - padding * 2);
+  final aW = math.max(1.0, size.width  - padding * 2);
   final aH = math.max(1.0, size.height - padding * 2);
   final ratio = math.max(1, maxX) / math.max(1, maxY);
   final aRatio = aW / aH;
   late double dW, dH;
   if (aRatio > ratio) {
-    dH = aH;
-    dW = dH * ratio;
+    dH = aH; dW = dH * ratio;
   } else {
-    dW = aW;
-    dH = dW / ratio;
+    dW = aW; dH = dW / ratio;
   }
   return Rect.fromLTWH(
       padding + (aW - dW) / 2, padding + (aH - dH) / 2, dW, dH);
@@ -2588,10 +2020,7 @@ class _FullScreenDrawPageState extends State<FullScreenDrawPage> {
   void _addPoint(Offset p) {
     if (_completing) return;
     if (_lastAdded != null && (p - _lastAdded!).distance < 1.2) return;
-    setState(() {
-      _points.add(p);
-      _lastAdded = p;
-    });
+    setState(() { _points.add(p); _lastAdded = p; });
   }
 
   Future<void> _finish() async {
@@ -2623,28 +2052,18 @@ class _FullScreenDrawPageState extends State<FullScreenDrawPage> {
         title: const Text('Draw Path'),
         actions: [
           IconButton(
-            onPressed: () => setState(() {
-              _points = [];
-              _lastAdded = null;
-            }),
-            icon: const Icon(Icons.clear),
-            tooltip: 'Clear',
+            onPressed: () => setState(() { _points = []; _lastAdded = null; }),
+            icon: const Icon(Icons.clear), tooltip: 'Clear',
           ),
-          IconButton(
-              onPressed: _finish,
-              icon: const Icon(Icons.check),
+          IconButton(onPressed: _finish, icon: const Icon(Icons.check),
               tooltip: 'Done'),
           const SizedBox(width: 8),
         ],
       ),
       body: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onPanStart: (d) {
-          if (!_completing) _addPoint(d.localPosition);
-        },
-        onPanUpdate: (d) {
-          if (!_completing) _addPoint(d.localPosition);
-        },
+        onPanStart: (d) { if (!_completing) _addPoint(d.localPosition); },
+        onPanUpdate: (d) { if (!_completing) _addPoint(d.localPosition); },
         child: Stack(children: [
           CustomPaint(
             painter: _FreeDrawPainter(_points),
@@ -2669,8 +2088,7 @@ class _FreeDrawPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(
-        Offset.zero & size, Paint()..color = const Color(0xFFFAFAFA));
+    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFFFAFAFA));
     if (points.length < 2) return;
     final path = Path()..moveTo(points.first.dx, points.first.dy);
     for (int i = 1; i < points.length; i++) {
