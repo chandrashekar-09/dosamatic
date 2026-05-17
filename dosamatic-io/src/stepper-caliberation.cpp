@@ -54,8 +54,8 @@ const OtaConfig otaConfig = {
 #define DIR3_PIN  14
 #define LIM3_PIN  19
 
-#define DC1_PIN 12
-#define DC2_PIN 13
+#define DC_PWM_PIN 12
+#define DC_DIR_PIN 13
 
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper* stepper1 = nullptr;
@@ -107,9 +107,9 @@ float junctionDeviation = 1.20f;
 
 const int DC_PWM_FREQ = 20000;
 const int DC_PWM_RES = 8;
-const int DC1_CH = 0;
-const int DC2_CH = 1;
+const int DC_PWM_CH = 0;
 int dcPwm = 0;
+int dcDirection = 1;
 
 bool s1Homed = false;
 bool s2Homed = false;
@@ -198,31 +198,37 @@ void setDcPwm(int pwm) {
 	if (clamped < 0) clamped = 0;
 	if (clamped > 255) clamped = 255;
 	dcPwm = clamped;
+	digitalWrite(DC_DIR_PIN, dcDirection > 0 ? HIGH : LOW);
 
 #ifndef ESP_ARDUINO_VERSION_MAJOR
 #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-	ledcWriteChannel(DC1_CH, dcPwm);
-	ledcWriteChannel(DC2_CH, dcPwm);
+	ledcWriteChannel(DC_PWM_CH, dcPwm);
 #else
-	ledcWrite(DC1_CH, dcPwm);
-	ledcWrite(DC2_CH, dcPwm);
+	ledcWrite(DC_PWM_CH, dcPwm);
 #endif
+}
+
+void setDcMotor(int speed) {
+	int clamped = speed;
+	if (clamped < -255) clamped = -255;
+	if (clamped > 255) clamped = 255;
+	dcDirection = clamped >= 0 ? 1 : -1;
+	setDcPwm(abs(clamped));
 }
 
 void initDcPwm() {
 #ifndef ESP_ARDUINO_VERSION_MAJOR
 #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
+	pinMode(DC_DIR_PIN, OUTPUT);
+	digitalWrite(DC_DIR_PIN, HIGH);
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-	ledcAttachChannel(DC1_PIN, DC_PWM_FREQ, DC_PWM_RES, DC1_CH);
-	ledcAttachChannel(DC2_PIN, DC_PWM_FREQ, DC_PWM_RES, DC2_CH);
+	ledcAttachChannel(DC_PWM_PIN, DC_PWM_FREQ, DC_PWM_RES, DC_PWM_CH);
 #else
-	ledcSetup(DC1_CH, DC_PWM_FREQ, DC_PWM_RES);
-	ledcSetup(DC2_CH, DC_PWM_FREQ, DC_PWM_RES);
-	ledcAttachPin(DC1_PIN, DC1_CH);
-	ledcAttachPin(DC2_PIN, DC2_CH);
+	ledcSetup(DC_PWM_CH, DC_PWM_FREQ, DC_PWM_RES);
+	ledcAttachPin(DC_PWM_PIN, DC_PWM_CH);
 #endif
 }
 
@@ -1286,6 +1292,7 @@ void setupWebServer() {
 		doc["path_accel"] = pathAcceleration;
 		doc["junction_dev"] = junctionDeviation;
 		doc["dc_pwm"] = dcPwm;
+		doc["dc_dir"] = dcDirection > 0 ? "forward" : "reverse";
 		doc["file_running"] = fileRunning;
 		doc["file_name"] = runningFile;
 		doc["file_error"] = fileError;
@@ -1326,7 +1333,7 @@ void setupWebServer() {
 			return;
 		}
 		long speed = doc["speed"].as<long>();
-		setDcPwm((int)abs(speed));
+		setDcMotor((int)speed);
 		spindleEnabled = speed != 0;
 		sendJsonResponse(200, "{\"status\":\"ok\"}");
 	});
